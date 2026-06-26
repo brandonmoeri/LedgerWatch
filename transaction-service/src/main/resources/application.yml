@@ -1,9 +1,9 @@
 server:
-  port: 8081
+  port: 8082
 
 spring:
   application:
-    name: account-service
+    name: transaction-service
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/ledgerwatch}
     username: ${DB_USERNAME}
@@ -11,5 +11,5 @@ spring:
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
-      ddl-auto: none
+      ddl-auto: validate
     open-in-view: false
