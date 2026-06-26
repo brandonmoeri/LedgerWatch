@@ -6,9 +6,11 @@ spring:
     name: account-service
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/ledgerwatch}
-    username: ${DB_USERNAME}
-    password: ${DB_PASSWORD}
+    username: ${DB_USERNAME:ledger}
+    password: ${DB_PASSWORD:ledger}
     driver-class-name: org.postgresql.Driver
+    hikari:
+      schema: accounts
   jpa:
     hibernate:
       ddl-auto: none
