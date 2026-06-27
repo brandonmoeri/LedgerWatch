@@ -38,10 +38,13 @@ LedgerWatch/
 ## Getting started
 
 ```bash
-# 1. Start local Postgres
+# 1. Copy env file (edit values if needed)
+cp .env.example .env
+
+# 2. Start local Postgres
 docker-compose up -d
 
-# 2. Run services (from repo root)
+# 3. Run services (from repo root)
 mvn -pl account-service spring-boot:run
 mvn -pl transaction-service spring-boot:run
 ```
@@ -53,7 +56,7 @@ mvn -pl transaction-service spring-boot:run
 | `GET` | `/accounts/{id}` | Fetch account by UUID |
 | `POST` | `/accounts` | Create account (`ownerName`, optional `initialBalance`) |
 | `PATCH` | `/accounts/{id}` | Update `ownerName` and/or `status` |
-| `GET` | `/actuator/health` | Health probe |
+| `GET` | `/health` | Health probe |
 
 Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 
