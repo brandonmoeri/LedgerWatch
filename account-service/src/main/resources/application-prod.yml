@@ -6,7 +6,7 @@ spring:
     hikari:
       schema: accounts
       maximum-pool-size: 5
-      connection-timeout: 3000
+      connection-timeout: 30000
   jpa:
     hibernate:
       ddl-auto: none
