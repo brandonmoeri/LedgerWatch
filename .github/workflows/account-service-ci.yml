@@ -1,0 +1,39 @@
+name: Account Service CI
+
+on:
+  pull_request:
+    branches:
+      - master
+      - dev
+    paths:
+      - 'account-service/**'
+      - 'pom.xml'
+      - '.github/workflows/account-service-ci.yml'
+
+jobs:
+  build-and-test:
+    name: Build & Test (Java 21)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Build and run tests
+        working-directory: account-service
+        run: mvn --batch-mode verify
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: account-service/target/surefire-reports/
+          retention-days: 7
