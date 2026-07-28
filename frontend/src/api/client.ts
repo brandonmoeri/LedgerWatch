@@ -1,4 +1,5 @@
 import axios, { AxiosError } from 'axios';
+import { authStub } from '../auth/authStub';
 
 export interface ApiError {
     status: number;
@@ -10,6 +11,14 @@ const client = axios.create({
     baseURL: '/api',
     headers: { 'Content-Type': 'application/json' },
     timeout: 10_000,
+});
+
+client.interceptors.request.use((config) => {
+    const token = authStub.getToken();
+    if (token) {
+        config.headers.Authorization= `Bearer ${token}`;
+    }
+    return config;
 });
 
 client.interceptors.response.use(
