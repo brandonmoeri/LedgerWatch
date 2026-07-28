@@ -5,10 +5,6 @@ on:
     branches:
       - master
       - dev
-    paths:
-      - 'account-service/**'
-      - 'pom.xml'
-      - '.github/workflows/account-service-ci.yml'
 
 jobs:
   build-and-test:
