@@ -11,6 +11,9 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<Navigate to="/accounts" replace />} />
+          <Route path="/accounts" element={<AccountsDashboardPage />} />
+          <Route path="/accounts/new" element={<CreateAccountPage />} />
+          <Route path="/accounts/:id" element={<AccountDetailPage />} />
         </Routes>
       </BrowserRouter>
     </Provider>
