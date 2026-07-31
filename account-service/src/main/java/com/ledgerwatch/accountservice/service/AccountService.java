@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.UUID;
@@ -25,6 +26,10 @@ public class AccountService {
         Objects.requireNonNull(id, "Account id must not be null");
         return repo.findById(id)
             .orElseThrow(() -> new NoSuchElementException("Account not found: " + id));
+    }
+
+    public List<Account> getAll() {
+        return repo.findAll();
     }
 
     @Transactional

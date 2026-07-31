@@ -8,6 +8,7 @@ import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -23,6 +24,13 @@ public class AccountController {
     @GetMapping("/{id}")
     public AccountResponse getAccountById(@PathVariable UUID id) {
         return AccountResponse.from(accountService.getById(id));
+    }
+
+    @GetMapping
+    public List<AccountResponse> getAllAccounts() {
+        return accountService.getAll().stream()
+            .map(AccountResponse::from)
+            .toList();
     }
 
     @PostMapping
