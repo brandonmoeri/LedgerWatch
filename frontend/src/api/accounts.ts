@@ -7,6 +7,9 @@ export const accountsApi = {
     getById: (id: string): Promise<Account> =>
         client.get<Account>(`${BASE}/${id}`).then((r) => r.data),
 
+    getAll: (): Promise<Account[]> =>
+        client.get<Account[]>(BASE).then((r) => r.data),
+
     create: (body: CreateAccountRequest): Promise<Account> =>
         client.post<Account>(BASE, body).then((r) => r.data),
 
