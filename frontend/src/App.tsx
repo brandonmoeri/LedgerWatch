@@ -10,7 +10,7 @@ export default function App() {
     <Provider store={store}>
       <BrowserRouter>
         <Routes>
-          <Route path="/" element={<Navigate to="/accounts/new" replace />} />
+          <Route path="/" element={<Navigate to="/accounts" replace />} />
           <Route path="/accounts" element={<AccountsDashboardPage />} />
           <Route path="/accounts/new" element={<CreateAccountPage />} />
           <Route path="/accounts/:id" element={<AccountDetailPage />} />
