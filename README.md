@@ -93,7 +93,6 @@ terraform apply -var "admin_cidr=<your-ip>/32" -target=aws_db_instance.main
 docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<rds_endpoint>:5432/ledgerwatch?sslmode=require" < docker/postgres/init.sql
 terraform apply -var "admin_cidr=<your-ip>/32"
 ```
-```
 
 **Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. Terraform state is local (`infra/aws/*.tfstate*`, gitignored) — the resources above are not currently running; this is the reproducible path to bring them back up.
 
