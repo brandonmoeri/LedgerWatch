@@ -36,7 +36,7 @@ public class TransactionController {
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     public TransactionResponse createTransaction(@Valid @RequestBody CreateTransactionRequest request) {
-        return TransactionService.from(transactionService.createTransaction(request));
+        return TransactionResponse.from(transactionService.createTransaction(request));
     }
 
     @PatchMapping("/{id}")
