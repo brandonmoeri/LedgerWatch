@@ -1,10 +1,11 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
 import { configureStore } from '@reduxjs/toolkit';
-import { vi, describe, it, expect } from 'vitest';
+import { vi, describe, it, expect, beforeEach } from 'vitest';
 import AccountsDashboardPage from './AccountsDashboardPage';
 import accountsReducer from '../store/accountsSlice';
+import { accountsApi } from '../api/accounts';
 import type { Account } from '../types/account';
 
 vi.mock('../api/accounts', () => ({
@@ -123,6 +124,32 @@ describe('AccountsDashboardPage', () => {
             renderDashboard({ status: 'succeeded', items: [mockAccount] });
             expect(screen.getByRole('link', { name: /^view$/i }))
                 .toHaveAttribute('href', '/accounts/acc-1');
+        });
+
+        it('renders one row per account when multiple are present', () => {
+            const second: Account = { ...mockAccount, id: 'acc-2', ownerName: 'Bob Jones' };
+            renderDashboard({ items: [mockAccount, second] });
+            // header row + 2 data rows
+            expect(screen.getAllByRole('row')).toHaveLength(3);
+            expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+            expect(screen.getByText('Bob Jones')).toBeInTheDocument();
+        });
+
+        it('displays createdAt formatted for the locale', () => {
+            renderDashboard({ items: [mockAccount] });
+            const expected = new Date(mockAccount.createdAt).toLocaleDateString();
+            expect(screen.getByText(expected)).toBeInTheDocument();
+        });
+    });
+
+    describe('idle state', () => {
+        beforeEach(() => {
+            vi.mocked(accountsApi.getAll).mockResolvedValue([]);
+        });
+
+        it('dispatches fetchAccounts when status is idle', async () => {
+            await act(async () => renderDashboard({ status: 'idle' }));
+            expect(vi.mocked(accountsApi.getAll)).toHaveBeenCalledTimes(1);
         });
     });
 })
