@@ -13,3 +13,5 @@ spring:
   sql:
     init:
       mode: never   # skip docker/postgres/init.sql
+  flyway:
+    enabled: false
