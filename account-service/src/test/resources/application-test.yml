@@ -1,17 +1,2 @@
-spring:
-  datasource:
-    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1
-    driver-class-name: org.h2.Driver
-    username: sa
-    password:
-    hikari:
-      schema: PUBLIC  # H2's built-in default schema; overrides "accounts" from application.yml
-  jpa:
-    hibernate:
-      ddl-auto: create-drop
-    database-platform: org.hibernate.dialect.H2Dialect
-  sql:
-    init:
-      mode: never   # skip docker/postgres/init.sql
-  flyway:
-    enabled: false
+# Datasource is supplied automatically via @ServiceConnection (PostgreSQLContainer).
+# Flyway runs V1__baseline.sql against the real container; no overrides needed here.
