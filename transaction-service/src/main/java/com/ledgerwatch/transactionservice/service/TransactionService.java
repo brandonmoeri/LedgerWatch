@@ -1,6 +1,7 @@
 package com.ledgerwatch.transactionservice.service;
 
 import com.ledgerwatch.transactionservice.domain.Transaction;
+import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
@@ -44,6 +45,9 @@ public class TransactionService {
     @Transactional
     public Transaction updateTransaction(UUID id, UpdateTransactionRequest request) {
         Transaction tx = Objects.requireNonNull(getById(id), "getById returned null");
+        if (TransactionStatus.VOIDED.equals(tx.getStatus())) {
+            throw new IllegalStateException("Voided transaction cannot be modified: " + id);
+        }
         if (request.status() != null) {
             tx.setStatus(request.status());
         }
