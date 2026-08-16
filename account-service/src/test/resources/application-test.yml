@@ -3,3 +3,6 @@ spring:
     url: jdbc:postgresql://localhost:5432/ledgerwatch
     username: ledger
     password: ledger
+
+jwt:
+  secret: "test-secret-that-is-exactly-32b!!"

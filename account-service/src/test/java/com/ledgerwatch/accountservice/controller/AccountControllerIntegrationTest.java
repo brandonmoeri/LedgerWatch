@@ -17,6 +17,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.UUID;
 
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -38,6 +39,7 @@ public class AccountControllerIntegrationTest {
     private String createAccount(String name) throws Exception {
         var body = objectMapper.writeValueAsString(new CreateAccountRequest(name, null));
         var result = mockMvc.perform(post("/accounts")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andReturn();
         return objectMapper.readTree(result.getResponse().getContentAsString()).get("id").asText();
@@ -45,7 +47,7 @@ public class AccountControllerIntegrationTest {
 
     @Test
     void getAccount_unknownId_returns404() throws Exception {
-        mockMvc.perform(get("/accounts/{id}", UUID.randomUUID()))
+        mockMvc.perform(get("/accounts/{id}", UUID.randomUUID()).with(jwt()))
             .andExpect(status().isNotFound());
     }
 
@@ -53,6 +55,7 @@ public class AccountControllerIntegrationTest {
     void updateAccount_unknownId_returns404() throws Exception {
         var body = objectMapper.writeValueAsString(new UpdateAccountRequest("X", null));
         mockMvc.perform(patch("/accounts/{id}", UUID.randomUUID())
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isNotFound());
     }
@@ -62,6 +65,7 @@ public class AccountControllerIntegrationTest {
         var id = createAccount("Before");
         var body = objectMapper.writeValueAsString(new UpdateAccountRequest("After", AccountStatus.FROZEN));
         mockMvc.perform(patch("/accounts/{id}", id)
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.ownerName").value("After"))
@@ -73,11 +77,13 @@ public class AccountControllerIntegrationTest {
         var id = createAccount("To Close");
         var close = objectMapper.writeValueAsString(new UpdateAccountRequest(null, AccountStatus.CLOSED));
         mockMvc.perform(patch("/accounts/{id}", id)
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(close))
             .andExpect(status().isOk());
 
         var retry = objectMapper.writeValueAsString(new UpdateAccountRequest("Attempt", null));
         mockMvc.perform(patch("/accounts/{id}", id)
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(retry))
             .andExpect(status().isConflict());
     }

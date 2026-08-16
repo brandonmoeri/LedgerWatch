@@ -16,6 +16,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.math.BigDecimal;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -49,6 +50,7 @@ class CreateAccountIntegrationTest {
         var request = new CreateAccountRequest("Alice Ledger", new BigDecimal("500.00"));
 
         mockMvc.perform(post("/accounts")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isCreated())
@@ -63,6 +65,7 @@ class CreateAccountIntegrationTest {
         var request = new CreateAccountRequest("", null);
 
         mockMvc.perform(post("/accounts")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
@@ -74,6 +77,7 @@ class CreateAccountIntegrationTest {
         var request = new CreateAccountRequest("Bob", new BigDecimal("-1.00"));
 
         mockMvc.perform(post("/accounts")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
