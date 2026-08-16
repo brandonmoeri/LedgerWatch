@@ -1,1 +1,5 @@
-# Datasource and Flyway are configured automatically via @ServiceConnection (PostgreSQLContainer).
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ledgerwatch
+    username: ledger
+    password: ledger

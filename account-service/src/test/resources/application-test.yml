@@ -1,2 +1,5 @@
-# Datasource is supplied automatically via @ServiceConnection (PostgreSQLContainer).
-# Flyway runs V1__baseline.sql against the real container; no overrides needed here.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ledgerwatch
+    username: ledger
+    password: ledger

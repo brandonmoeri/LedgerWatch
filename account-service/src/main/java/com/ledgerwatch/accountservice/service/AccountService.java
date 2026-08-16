@@ -1,6 +1,7 @@
 package com.ledgerwatch.accountservice.service;
 
 import com.ledgerwatch.accountservice.domain.Account;
+import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
@@ -48,6 +49,9 @@ public class AccountService {
     @Transactional
     public Account updateAccount(UUID id, UpdateAccountRequest request) {
         Account account = Objects.requireNonNull(getById(id), "getById returned null");
+        if (AccountStatus.CLOSED.equals(account.getStatus())) {
+            throw new IllegalStateException("Account is closed and cannot be modified: " + id);
+        }
         if (request.ownerName() != null && !request.ownerName().isBlank()) {
             account.setOwnerName(request.ownerName());
         }
