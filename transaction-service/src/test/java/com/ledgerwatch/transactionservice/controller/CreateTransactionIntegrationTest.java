@@ -1,8 +1,9 @@
-package com.ledgerwatch.accountservice.controller;
+package com.ledgerwatch.transactionservice.controller;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
-import com.ledgerwatch.accountservice.repository.AccountRepository;
+import com.ledgerwatch.transactionservice.domain.TransactionType;
+import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
+import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -14,9 +15,9 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -24,18 +25,18 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 @SuppressWarnings("null")
-class CreateAccountIntegrationTest {
+class CreateTransactionIntegrationTest {
 
     @Autowired MockMvc mockMvc;
     @Autowired ObjectMapper objectMapper;
-    @Autowired AccountRepository accountRepository;
+    @Autowired TransactionRepository transactionRepository;
     @Autowired Flyway flyway;
 
     // MockMvc dispatches through the servlet container and commits its own transactions,
     // so @Transactional rollback does not apply here — delete explicitly instead.
     @AfterEach
     void cleanUp() {
-        accountRepository.deleteAll();
+        transactionRepository.deleteAll();
     }
 
     @Test
@@ -46,41 +47,38 @@ class CreateAccountIntegrationTest {
     }
 
     @Test
-    void createAccount_validRequest_returns201WithBody() throws Exception {
-        var request = new CreateAccountRequest("Alice Ledger", new BigDecimal("500.00"));
+    void createTransaction_validRequest_returns201WithBody() throws Exception {
+        var request = new CreateTransactionRequest(UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("250.00"), "salary");
 
-        mockMvc.perform(post("/accounts")
-                .with(jwt())
+        mockMvc.perform(post("/transactions")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isCreated())
             .andExpect(jsonPath("$.id").isNotEmpty())
-            .andExpect(jsonPath("$.ownerName").value("Alice Ledger"))
-            .andExpect(jsonPath("$.balance").value(500.00))
-            .andExpect(jsonPath("$.status").value("ACTIVE"));
+            .andExpect(jsonPath("$.type").value("CREDIT"))
+            .andExpect(jsonPath("$.amount").value(250.00))
+            .andExpect(jsonPath("$.status").value("POSTED"));
     }
 
     @Test
-    void createAccount_blankOwnerName_returns400WithFieldError() throws Exception {
-        var request = new CreateAccountRequest("", null);
+    void createTransaction_nullAccountId_returns400WithFieldError() throws Exception {
+        var request = new CreateTransactionRequest(null, TransactionType.DEBIT, new BigDecimal("10.00"), null);
 
-        mockMvc.perform(post("/accounts")
-                .with(jwt())
+        mockMvc.perform(post("/transactions")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.errors.ownerName").isNotEmpty());
+            .andExpect(jsonPath("$.errors.accountId").isNotEmpty());
     }
 
     @Test
-    void createAccount_negativeBalance_returns400WithFieldError() throws Exception {
-        var request = new CreateAccountRequest("Bob", new BigDecimal("-1.00"));
+    void createTransaction_zeroAmount_returns400WithFieldError() throws Exception {
+        var request = new CreateTransactionRequest(UUID.randomUUID(), TransactionType.DEBIT, BigDecimal.ZERO, null);
 
-        mockMvc.perform(post("/accounts")
-                .with(jwt())
+        mockMvc.perform(post("/transactions")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.errors.initialBalance").isNotEmpty());
+            .andExpect(jsonPath("$.errors.amount").isNotEmpty());
     }
 }

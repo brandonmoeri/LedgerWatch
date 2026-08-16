@@ -15,3 +15,9 @@ spring:
     hibernate:
       ddl-auto: none
     open-in-view: false
+  flyway:
+    schemas: accounts
+    default-schema: accounts
+
+jwt:
+  secret: ${JWT_SECRET}
