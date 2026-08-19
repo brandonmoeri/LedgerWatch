@@ -6,6 +6,7 @@ import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.service.AccountService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -35,11 +36,13 @@ public class AccountController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    @PreAuthorize("hasRole('ADMIN')")
     public AccountResponse createAccount(@Valid @RequestBody CreateAccountRequest request) {
         return AccountResponse.from(accountService.createAccount(request));
     }
 
     @PatchMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     public AccountResponse updateAccount(@PathVariable UUID id, @Valid @RequestBody UpdateAccountRequest request) {
         return AccountResponse.from(accountService.updateAccount(id, request));
     }
