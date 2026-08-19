@@ -10,6 +10,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -50,7 +51,7 @@ class CreateAccountIntegrationTest {
         var request = new CreateAccountRequest("Alice Ledger", new BigDecimal("500.00"));
 
         mockMvc.perform(post("/accounts")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isCreated())
@@ -65,7 +66,7 @@ class CreateAccountIntegrationTest {
         var request = new CreateAccountRequest("", null);
 
         mockMvc.perform(post("/accounts")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
@@ -77,7 +78,7 @@ class CreateAccountIntegrationTest {
         var request = new CreateAccountRequest("Bob", new BigDecimal("-1.00"));
 
         mockMvc.perform(post("/accounts")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
