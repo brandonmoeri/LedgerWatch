@@ -8,7 +8,7 @@ A banking microservice platform for tracking accounts and transactions, built as
 |---|---|
 | `account-service` (Spring Boot 3.3, Java 21) | **Functional** — full account CRUD REST API, JPA persistence, validation, unit + integration tests |
 | `transaction-service` (Spring Boot 3.3, Java 21) | **Functional** — full transaction CRUD REST API, JPA persistence, validation, unit + integration tests |
-| Postgres (local, via Docker Compose) | Running — seeded with `accounts` and `transactions` schemas |
+| Postgres + both services (local, via Docker Compose) | Running — Postgres seeded with `accounts` and `transactions` schemas |
 | React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — accounts dashboard, detail, and create pages; Redux Toolkit store; Axios API client; Vitest component tests |
 | CI/CD | Not started |
 | AWS infra (`account-service`) | IaC ready (Terraform, `infra/aws/`) — deployed to ECS Fargate + RDS and CRUD-verified end-to-end; torn down after verification |
@@ -30,9 +30,10 @@ LedgerWatch/
 ├── account-service/          # Spring Boot — account identity & balances
 │   └── Dockerfile            # Multi-stage build (Maven reactor → JRE runtime image)
 ├── transaction-service/      # Spring Boot — transaction posting & history
+│   └── Dockerfile            # Multi-stage build (Maven reactor → JRE runtime image)
 ├── frontend/                 # React/TS SPA — Vite, Redux Toolkit, React Router
 ├── docker/postgres/init.sql  # Schema seed (accounts + transactions schemas)
-├── docker-compose.yml        # Local Postgres
+├── docker-compose.yml        # Postgres + account-service + transaction-service
 ├── infra/aws/                # Terraform — account-service AWS deployment
 └── pom.xml                   # Maven parent (Java 21, Spring Boot 3.3.4)
 ```
@@ -40,16 +41,17 @@ LedgerWatch/
 ## Getting started
 
 ```bash
-# Start local Postgres
-docker-compose up -d
+# Copy env template and fill in JWT_SECRET (32+ random bytes)
+cp .env.example .env
 
-# Run services (from repo root)
-mvn -pl account-service spring-boot:run
-mvn -pl transaction-service spring-boot:run
+# Start Postgres + account-service + transaction-service
+docker compose up -d --build
 
 # Start the frontend (http://localhost:5173)
 cd frontend && npm install && npm run dev
 ```
+
+To run a service outside its container (e.g. for debugging), stop it in Compose and run it directly from the repo root: `mvn -pl account-service spring-boot:run` or `mvn -pl transaction-service spring-boot:run`.
 
 ## APIs
 

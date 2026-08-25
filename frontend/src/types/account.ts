@@ -18,3 +18,11 @@ export interface UpdateAccountRequest {
     ownerName?: string | null;
     status?: AccountStatus | null;
 }
+
+export interface AccountsQuery {
+    page?: number;
+    size?: number;
+    sort?: string;
+    status?: AccountStatus;
+    ownerName?: string;
+}

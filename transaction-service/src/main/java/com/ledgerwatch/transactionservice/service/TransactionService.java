@@ -2,13 +2,16 @@ package com.ledgerwatch.transactionservice.service;
 
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
+import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
+import com.ledgerwatch.transactionservice.repository.TransactionSpecifications;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.UUID;
@@ -28,8 +31,8 @@ public class TransactionService {
             .orElseThrow(() -> new NoSuchElementException("Transaction not found: " + id));
     }
 
-    public List<Transaction> getAll() {
-        return repo.findAll();
+    public Page<Transaction> getAll(UUID accountId, TransactionType type, TransactionStatus status, String description, Pageable pageable) {
+        return repo.findAll(TransactionSpecifications.filter(accountId, type, status, description), pageable);
     }
 
     @Transactional

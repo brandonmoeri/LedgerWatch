@@ -37,8 +37,12 @@ class TransactionControllerIntegrationTest {
     }
 
     private String createTransaction() throws Exception {
+        return createTransaction(UUID.randomUUID(), TransactionType.DEBIT, new BigDecimal("100.00"), null);
+    }
+
+    private String createTransaction(UUID accountId, TransactionType type, BigDecimal amount, String description) throws Exception {
         var body = objectMapper.writeValueAsString(
-            new CreateTransactionRequest(UUID.randomUUID(), TransactionType.DEBIT, new BigDecimal("100.00"), null));
+            new CreateTransactionRequest(accountId, type, amount, description));
         var result = mockMvc.perform(post("/transactions")
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andReturn();
@@ -68,6 +72,24 @@ class TransactionControllerIntegrationTest {
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("VOIDED"))
             .andExpect(jsonPath("$.description").value("cancelled"));
+    }
+
+    @Test
+    void getAllTransactions_returnsPagedResultsFilteredByAccountIdAndType() throws Exception {
+        var accountId = UUID.randomUUID();
+        var creditId = createTransaction(accountId, TransactionType.CREDIT, new BigDecimal("25.00"), "salary");
+        createTransaction(accountId, TransactionType.DEBIT, new BigDecimal("10.00"), "groceries");
+        createTransaction(UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("999.00"), "other account");
+
+        mockMvc.perform(get("/transactions")
+                .param("accountId", accountId.toString())
+                .param("type", "CREDIT")
+                .param("page", "0")
+                .param("size", "5"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.content.length()").value(1))
+            .andExpect(jsonPath("$.content[0].id").value(creditId))
+            .andExpect(jsonPath("$.page.totalElements").value(1));
     }
 
     @Test

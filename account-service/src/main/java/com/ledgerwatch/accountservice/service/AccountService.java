@@ -5,11 +5,13 @@ import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
+import com.ledgerwatch.accountservice.repository.AccountSpecifications;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.UUID;
@@ -29,8 +31,8 @@ public class AccountService {
             .orElseThrow(() -> new NoSuchElementException("Account not found: " + id));
     }
 
-    public List<Account> getAll() {
-        return repo.findAll();
+    public Page<Account> getAll(AccountStatus status, String ownerName, Pageable pageable) {
+        return repo.findAll(AccountSpecifications.filter(status, ownerName), pageable);
     }
 
     @Transactional

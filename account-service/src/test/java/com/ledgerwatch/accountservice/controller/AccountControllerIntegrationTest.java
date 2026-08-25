@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -39,7 +40,7 @@ public class AccountControllerIntegrationTest {
     private String createAccount(String name) throws Exception {
         var body = objectMapper.writeValueAsString(new CreateAccountRequest(name, null));
         var result = mockMvc.perform(post("/accounts")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andReturn();
         return objectMapper.readTree(result.getResponse().getContentAsString()).get("id").asText();
@@ -55,7 +56,7 @@ public class AccountControllerIntegrationTest {
     void updateAccount_unknownId_returns404() throws Exception {
         var body = objectMapper.writeValueAsString(new UpdateAccountRequest("X", null));
         mockMvc.perform(patch("/accounts/{id}", UUID.randomUUID())
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isNotFound());
     }
@@ -65,7 +66,7 @@ public class AccountControllerIntegrationTest {
         var id = createAccount("Before");
         var body = objectMapper.writeValueAsString(new UpdateAccountRequest("After", AccountStatus.FROZEN));
         mockMvc.perform(patch("/accounts/{id}", id)
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.ownerName").value("After"))
@@ -73,17 +74,40 @@ public class AccountControllerIntegrationTest {
     }
 
     @Test
+    void getAllAccounts_returnsPagedResultsFilteredByStatusAndOwnerName() throws Exception {
+        var activeId = createAccount("Alice Active");
+        createAccount("Bob Active");
+        var close = objectMapper.writeValueAsString(new UpdateAccountRequest(null, AccountStatus.CLOSED));
+        var closedId = createAccount("Closed Carl");
+        mockMvc.perform(patch("/accounts/{id}", closedId)
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
+                .contentType(MediaType.APPLICATION_JSON).content(close))
+            .andExpect(status().isOk());
+
+        mockMvc.perform(get("/accounts")
+                .with(jwt())
+                .param("status", "ACTIVE")
+                .param("ownerName", "alice")
+                .param("page", "0")
+                .param("size", "5"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.content.length()").value(1))
+            .andExpect(jsonPath("$.content[0].id").value(activeId))
+            .andExpect(jsonPath("$.page.totalElements").value(1));
+    }
+
+    @Test
     void updateAccount_closedAccount_returns409() throws Exception {
         var id = createAccount("To Close");
         var close = objectMapper.writeValueAsString(new UpdateAccountRequest(null, AccountStatus.CLOSED));
         mockMvc.perform(patch("/accounts/{id}", id)
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(close))
             .andExpect(status().isOk());
 
         var retry = objectMapper.writeValueAsString(new UpdateAccountRequest("Attempt", null));
         mockMvc.perform(patch("/accounts/{id}", id)
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(retry))
             .andExpect(status().isConflict());
     }
