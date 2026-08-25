@@ -1,5 +1,6 @@
 package com.ledgerwatch.accountservice.controller;
 
+import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.dto.AccountResponse;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
@@ -11,12 +12,16 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import jakarta.validation.Valid;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.data.web.PagedModel;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -41,12 +46,16 @@ public class AccountController {
     }
 
     @GetMapping
-    @Operation(summary = "List all accounts")
+    @Operation(summary = "List accounts",
+        description = "Supports pagination (page, size), sorting (sort), and filtering by status and ownerName.")
     @ApiResponse(responseCode = "200", description = "Accounts returned")
-    public List<AccountResponse> getAllAccounts() {
-        return accountService.getAll().stream()
-            .map(AccountResponse::from)
-            .toList();
+    public PagedModel<AccountResponse> getAllAccounts(
+            @RequestParam(required = false) AccountStatus status,
+            @RequestParam(required = false) String ownerName,
+            @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC) Pageable pageable) {
+        Page<AccountResponse> page = accountService.getAll(status, ownerName, pageable)
+            .map(AccountResponse::from);
+        return new PagedModel<>(page);
     }
 
     @PostMapping

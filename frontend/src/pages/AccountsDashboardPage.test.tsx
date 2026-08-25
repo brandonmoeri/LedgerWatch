@@ -32,12 +32,19 @@ function renderDashboard(overrides: {
     items?: Account[];
     status?: SliceStatus;
     error?: string | null;
+    page?: number;
+    totalPages?: number;
 } = {}) {
+    const items = overrides.items ?? [];
     const store = configureStore({
         reducer: { accounts: accountsReducer },
         preloadedState: {
             accounts: {
-                items: overrides.items ?? [],
+                items,
+                page: overrides.page ?? 0,
+                size: 20,
+                totalElements: items.length,
+                totalPages: overrides.totalPages ?? 1,
                 selectedAccount: null,
                 selectedStatus: 'idle' as const,
                 status: (overrides.status ?? 'succeeded') as SliceStatus,
@@ -144,12 +151,34 @@ describe('AccountsDashboardPage', () => {
 
     describe('idle state', () => {
         beforeEach(() => {
-            vi.mocked(accountsApi.getAll).mockResolvedValue([]);
+            vi.mocked(accountsApi.getAll).mockResolvedValue({
+                content: [],
+                page: { size: 20, number: 0, totalElements: 0, totalPages: 0 },
+            });
         });
 
         it('dispatches fetchAccounts when status is idle', async () => {
             await act(async () => renderDashboard({ status: 'idle' }));
             expect(vi.mocked(accountsApi.getAll)).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    describe('pagination controls', () => {
+        it('disables Previous on the first page and enables Next when more pages exist', () => {
+            renderDashboard({ items: [mockAccount], page: 0, totalPages: 3 });
+            expect(screen.getByRole('button', { name: /previous/i })).toBeDisabled();
+            expect(screen.getByRole('button', { name: /^next$/i })).toBeEnabled();
+        });
+
+        it('enables Previous and disables Next on the last page', () => {
+            renderDashboard({ items: [mockAccount], page: 2, totalPages: 3 });
+            expect(screen.getByRole('button', { name: /previous/i })).toBeEnabled();
+            expect(screen.getByRole('button', { name: /^next$/i })).toBeDisabled();
+        });
+
+        it('shows the current page and total pages', () => {
+            renderDashboard({ items: [mockAccount], page: 1, totalPages: 3 });
+            expect(screen.getByText('Page 2 of 3')).toBeInTheDocument();
         });
     });
 })

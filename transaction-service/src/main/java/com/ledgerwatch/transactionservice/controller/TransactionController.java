@@ -1,5 +1,7 @@
 package com.ledgerwatch.transactionservice.controller;
 
+import com.ledgerwatch.transactionservice.domain.TransactionStatus;
+import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
 import com.ledgerwatch.transactionservice.dto.TransactionResponse;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
@@ -10,11 +12,15 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import jakarta.validation.Valid;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.web.PageableDefault;
+import org.springframework.data.web.PagedModel;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.List;
 import java.util.UUID;
 
 @RestController
@@ -37,12 +43,18 @@ public class TransactionController {
     }
 
     @GetMapping
-    @Operation(summary = "List all transactions")
+    @Operation(summary = "List transactions",
+        description = "Supports pagination (page, size), sorting (sort), and filtering by accountId, type, status, and description.")
     @ApiResponse(responseCode = "200", description = "Transactions returned")
-    public List<TransactionResponse> getAllTransactions() {
-        return transactionService.getAll().stream()
-            .map(TransactionResponse::from)
-            .toList();
+    public PagedModel<TransactionResponse> getAllTransactions(
+            @RequestParam(required = false) UUID accountId,
+            @RequestParam(required = false) TransactionType type,
+            @RequestParam(required = false) TransactionStatus status,
+            @RequestParam(required = false) String description,
+            @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC) Pageable pageable) {
+        Page<TransactionResponse> page = transactionService.getAll(accountId, type, status, description, pageable)
+            .map(TransactionResponse::from);
+        return new PagedModel<>(page);
     }
 
     @PostMapping

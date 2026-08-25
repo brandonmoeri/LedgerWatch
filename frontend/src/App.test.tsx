@@ -12,7 +12,10 @@ import { auth } from './auth/auth';
 // Prevent real HTTP calls from either page
 vi.mock('./api/accounts', () => ({
     accountsApi: {
-        getAll: vi.fn(() => Promise.resolve([])),
+        getAll: vi.fn(() => Promise.resolve({
+            content: [],
+            page: { size: 20, number: 0, totalElements: 0, totalPages: 0 },
+        })),
         create: vi.fn(),
         getById: vi.fn(() => new Promise(() => {})),
         update: vi.fn(),

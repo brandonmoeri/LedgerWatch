@@ -74,6 +74,29 @@ public class AccountControllerIntegrationTest {
     }
 
     @Test
+    void getAllAccounts_returnsPagedResultsFilteredByStatusAndOwnerName() throws Exception {
+        var activeId = createAccount("Alice Active");
+        createAccount("Bob Active");
+        var close = objectMapper.writeValueAsString(new UpdateAccountRequest(null, AccountStatus.CLOSED));
+        var closedId = createAccount("Closed Carl");
+        mockMvc.perform(patch("/accounts/{id}", closedId)
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
+                .contentType(MediaType.APPLICATION_JSON).content(close))
+            .andExpect(status().isOk());
+
+        mockMvc.perform(get("/accounts")
+                .with(jwt())
+                .param("status", "ACTIVE")
+                .param("ownerName", "alice")
+                .param("page", "0")
+                .param("size", "5"))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.content.length()").value(1))
+            .andExpect(jsonPath("$.content[0].id").value(activeId))
+            .andExpect(jsonPath("$.page.totalElements").value(1));
+    }
+
+    @Test
     void updateAccount_closedAccount_returns409() throws Exception {
         var id = createAccount("To Close");
         var close = objectMapper.writeValueAsString(new UpdateAccountRequest(null, AccountStatus.CLOSED));

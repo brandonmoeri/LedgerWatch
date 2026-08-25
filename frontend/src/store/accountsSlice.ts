@@ -1,10 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { accountsApi } from '../api/accounts';
-import type { Account, UpdateAccountRequest } from '../types/account';
+import type { Account, AccountsQuery, UpdateAccountRequest } from '../types/account';
 
 export const fetchAccounts = createAsyncThunk(
     'accounts/fetchAll',
-    async () => accountsApi.getAll()
+    async (query: AccountsQuery = {}) => accountsApi.getAll(query)
 );
 
 export const fetchAccountById = createAsyncThunk(
@@ -20,6 +20,10 @@ export const updateAccount = createAsyncThunk(
 
 interface AccountsState {
     items: Account[];
+    page: number;
+    size: number;
+    totalElements: number;
+    totalPages: number;
     selectedAccount: Account | null;
     selectedStatus: 'idle' | 'loading' | 'succeeded' | 'failed';
     status: 'idle' | 'loading' | 'succeeded' | 'failed';
@@ -28,6 +32,10 @@ interface AccountsState {
 
 const initialState: AccountsState = {
     items: [],
+    page: 0,
+    size: 20,
+    totalElements: 0,
+    totalPages: 0,
     selectedAccount: null,
     selectedStatus: 'idle',
     status: 'idle',
@@ -46,7 +54,11 @@ const accountsSlice = createSlice({
             })
             .addCase(fetchAccounts.fulfilled, (state, action) => {
                 state.status = 'succeeded';
-                state.items = action.payload;
+                state.items = action.payload.content;
+                state.page = action.payload.page.number;
+                state.size = action.payload.page.size;
+                state.totalElements = action.payload.page.totalElements;
+                state.totalPages = action.payload.page.totalPages;
             })
             .addCase(fetchAccounts.rejected, (state, actions) => {
                 state.status = 'failed';
