@@ -8,11 +8,18 @@ import com.ledgerwatch.accountservice.repository.AccountRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentMatchers;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageImpl;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.jpa.domain.Specification;
 
 import java.math.BigDecimal;
+import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.UUID;
@@ -93,6 +100,21 @@ public class AccountServiceTest {
         assertThatThrownBy(() -> accountService.getById(unknown))
             .isInstanceOf(NoSuchElementException.class)
             .hasMessageContaining(unknown.toString());
+    }
+
+    // --- getAll ---
+
+    @Test
+    void getAll_delegatesToRepositoryWithSpecificationAndPageable() {
+        Pageable pageable = PageRequest.of(0, 10);
+        Page<Account> page = new PageImpl<>(List.of(existing));
+        when(accountRepository.findAll(ArgumentMatchers.<Specification<Account>>any(), eq(pageable)))
+            .thenReturn(page);
+
+        Page<Account> result = accountService.getAll(AccountStatus.ACTIVE, "Ali", pageable);
+
+        assertThat(result.getContent()).containsExactly(existing);
+        verify(accountRepository).findAll(ArgumentMatchers.<Specification<Account>>any(), eq(pageable));
     }
 
     // --- update ---
