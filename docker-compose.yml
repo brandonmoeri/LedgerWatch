@@ -17,5 +17,36 @@ services:
       timeout: 5s
       retries: 5
 
+  account-service:
+    build:
+      context: .
+      dockerfile: account-service/Dockerfile
+    container_name: ledgerwatch-account-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/ledgerwatch
+      DB_USERNAME: ledger
+      DB_PASSWORD: ledger
+      JWT_SECRET: ${JWT_SECRET}
+    ports:
+      - "8081:8081"
+
+  transaction-service:
+    build:
+      context: .
+      dockerfile: transaction-service/Dockerfile
+    container_name: ledgerwatch-transaction-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/ledgerwatch
+      DB_USERNAME: ledger
+      DB_PASSWORD: ledger
+    ports:
+      - "8082:8082"
+
 volumes:
   postgres_data:
