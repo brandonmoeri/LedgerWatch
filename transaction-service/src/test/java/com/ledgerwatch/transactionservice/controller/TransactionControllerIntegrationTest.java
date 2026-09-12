@@ -18,6 +18,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import java.math.BigDecimal;
 import java.util.UUID;
 
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -44,6 +45,7 @@ class TransactionControllerIntegrationTest {
         var body = objectMapper.writeValueAsString(
             new CreateTransactionRequest(accountId, type, amount, description));
         var result = mockMvc.perform(post("/transactions")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andReturn();
         return objectMapper.readTree(result.getResponse().getContentAsString()).get("id").asText();
@@ -51,7 +53,7 @@ class TransactionControllerIntegrationTest {
 
     @Test
     void getTransaction_unknownId_returns404() throws Exception {
-        mockMvc.perform(get("/transactions/{id}", UUID.randomUUID()))
+        mockMvc.perform(get("/transactions/{id}", UUID.randomUUID()).with(jwt()))
             .andExpect(status().isNotFound());
     }
 
@@ -59,6 +61,7 @@ class TransactionControllerIntegrationTest {
     void updateTransaction_unknownId_returns404() throws Exception {
         var body = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.VOIDED, null));
         mockMvc.perform(patch("/transactions/{id}", UUID.randomUUID())
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isNotFound());
     }
@@ -68,6 +71,7 @@ class TransactionControllerIntegrationTest {
         var id = createTransaction();
         var body = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.VOIDED, "cancelled"));
         mockMvc.perform(patch("/transactions/{id}", id)
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("VOIDED"))
@@ -82,6 +86,7 @@ class TransactionControllerIntegrationTest {
         createTransaction(UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("999.00"), "other account");
 
         mockMvc.perform(get("/transactions")
+                .with(jwt())
                 .param("accountId", accountId.toString())
                 .param("type", "CREDIT")
                 .param("page", "0")
@@ -97,12 +102,14 @@ class TransactionControllerIntegrationTest {
         var id = createTransaction();
         var void1 = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.VOIDED, null));
         mockMvc.perform(patch("/transactions/{id}", id)
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(void1))
             .andExpect(status().isOk());
 
         // any further mutation on a voided transaction is a conflict
         var void2 = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.POSTED, null));
         mockMvc.perform(patch("/transactions/{id}", id)
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON).content(void2))
             .andExpect(status().isConflict());
     }

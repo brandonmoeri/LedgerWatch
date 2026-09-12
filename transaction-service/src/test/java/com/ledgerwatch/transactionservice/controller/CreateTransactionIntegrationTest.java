@@ -18,6 +18,7 @@ import java.math.BigDecimal;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -51,6 +52,7 @@ class CreateTransactionIntegrationTest {
         var request = new CreateTransactionRequest(UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("250.00"), "salary");
 
         mockMvc.perform(post("/transactions")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isCreated())
@@ -65,6 +67,7 @@ class CreateTransactionIntegrationTest {
         var request = new CreateTransactionRequest(null, TransactionType.DEBIT, new BigDecimal("10.00"), null);
 
         mockMvc.perform(post("/transactions")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
@@ -76,6 +79,7 @@ class CreateTransactionIntegrationTest {
         var request = new CreateTransactionRequest(UUID.randomUUID(), TransactionType.DEBIT, BigDecimal.ZERO, null);
 
         mockMvc.perform(post("/transactions")
+                .with(jwt())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
