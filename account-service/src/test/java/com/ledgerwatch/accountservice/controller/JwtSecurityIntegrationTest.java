@@ -67,4 +67,9 @@ public class JwtSecurityIntegrationTest {
                 .header("Authorization", "Bearer " + tampered))
             .andExpect(status().isUnauthorized());
     }
+
+    @Test
+    void health_permitsWithoutToken() throws Exception {
+        mockMvc.perform(get("/actuator/health")).andExpect(status().isOk());
+    }
 }
