@@ -70,6 +70,6 @@ public class JwtSecurityIntegrationTest {
 
     @Test
     void health_permitsWithoutToken() throws Exception {
-        mockMvc.perform(get("/health")).andExpect(status().isOk());
+        mockMvc.perform(get("/actuator/health")).andExpect(status().isOk());
     }
 }
