@@ -19,6 +19,7 @@ import org.springframework.data.web.PageableDefault;
 import org.springframework.data.web.PagedModel;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
@@ -59,6 +60,7 @@ public class TransactionController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
+    @PreAuthorize("hasRole('ADMIN')")
     @Operation(summary = "Create a transaction")
     @ApiResponses({
         @ApiResponse(responseCode = "201", description = "Transaction created"),
@@ -70,6 +72,7 @@ public class TransactionController {
     }
 
     @PatchMapping("/{id}")
+    @PreAuthorize("hasRole('ADMIN')")
     @Operation(summary = "Update a transaction")
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "Transaction updated"),

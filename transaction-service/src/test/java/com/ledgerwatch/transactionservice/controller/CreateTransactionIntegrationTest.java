@@ -11,6 +11,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -52,7 +53,7 @@ class CreateTransactionIntegrationTest {
         var request = new CreateTransactionRequest(UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("250.00"), "salary");
 
         mockMvc.perform(post("/transactions")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isCreated())
@@ -67,7 +68,7 @@ class CreateTransactionIntegrationTest {
         var request = new CreateTransactionRequest(null, TransactionType.DEBIT, new BigDecimal("10.00"), null);
 
         mockMvc.perform(post("/transactions")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())
@@ -79,7 +80,7 @@ class CreateTransactionIntegrationTest {
         var request = new CreateTransactionRequest(UUID.randomUUID(), TransactionType.DEBIT, BigDecimal.ZERO, null);
 
         mockMvc.perform(post("/transactions")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isBadRequest())

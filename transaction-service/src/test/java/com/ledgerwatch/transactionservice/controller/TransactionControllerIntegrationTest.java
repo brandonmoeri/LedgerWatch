@@ -12,6 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 
@@ -45,7 +46,7 @@ class TransactionControllerIntegrationTest {
         var body = objectMapper.writeValueAsString(
             new CreateTransactionRequest(accountId, type, amount, description));
         var result = mockMvc.perform(post("/transactions")
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andReturn();
         return objectMapper.readTree(result.getResponse().getContentAsString()).get("id").asText();
@@ -61,7 +62,7 @@ class TransactionControllerIntegrationTest {
     void updateTransaction_unknownId_returns404() throws Exception {
         var body = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.VOIDED, null));
         mockMvc.perform(patch("/transactions/{id}", UUID.randomUUID())
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isNotFound());
     }
@@ -71,7 +72,7 @@ class TransactionControllerIntegrationTest {
         var id = createTransaction();
         var body = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.VOIDED, "cancelled"));
         mockMvc.perform(patch("/transactions/{id}", id)
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(body))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.status").value("VOIDED"))
@@ -102,14 +103,14 @@ class TransactionControllerIntegrationTest {
         var id = createTransaction();
         var void1 = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.VOIDED, null));
         mockMvc.perform(patch("/transactions/{id}", id)
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(void1))
             .andExpect(status().isOk());
 
         // any further mutation on a voided transaction is a conflict
         var void2 = objectMapper.writeValueAsString(new UpdateTransactionRequest(TransactionStatus.POSTED, null));
         mockMvc.perform(patch("/transactions/{id}", id)
-                .with(jwt())
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON).content(void2))
             .andExpect(status().isConflict());
     }
