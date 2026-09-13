@@ -1,4 +1,5 @@
 target/
+*.class
 .env
 .env.*
 !.env.example
