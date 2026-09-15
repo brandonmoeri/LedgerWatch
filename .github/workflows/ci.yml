@@ -11,9 +11,7 @@ jobs:
     name: Detect changed paths
     runs-on: ubuntu-latest
     outputs:
-      account-service: ${{ steps.filter.outputs['account-service'] }}
-      transaction-service: ${{ steps.filter.outputs['transaction-service'] }}
-      common: ${{ steps.filter.outputs.common }}
+      services: ${{ steps.set-matrix.outputs.services }}
     steps:
       # No checkout needed: for pull_request events dorny/paths-filter reads
       # the changed-file list from the GitHub API.
@@ -31,15 +29,28 @@ jobs:
               - 'Makefile'
               - '.github/workflows/ci.yml'
 
+      - name: Compute build matrix
+        id: set-matrix
+        run: |
+          services=()
+          if [[ "${{ steps.filter.outputs['account-service'] }}" == 'true' || "${{ steps.filter.outputs.common }}" == 'true' ]]; then
+            services+=("account-service")
+          fi
+          if [[ "${{ steps.filter.outputs['transaction-service'] }}" == 'true' || "${{ steps.filter.outputs.common }}" == 'true' ]]; then
+            services+=("transaction-service")
+          fi
+          json=$(printf '%s\n' "${services[@]}" | jq -R . | jq -sc .)
+          echo "services=$json" >> "$GITHUB_OUTPUT"
+
   build-and-test:
     name: Build & Test (${{ matrix.service }}, Java 21)
     needs: changes
-    if: needs.changes.outputs[matrix.service] == 'true' || needs.changes.outputs.common == 'true'
+    if: needs.changes.outputs.services != '[]'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        service: [account-service, transaction-service]
+        service: ${{ fromJson(needs.changes.outputs.services) }}
 
     steps:
       - name: Check out repository
