@@ -67,6 +67,10 @@ jobs:
           distribution: 'temurin'
           cache: 'maven'
 
+      - name: Check formatting
+        working-directory: ${{ matrix.service }}
+        run: mvn --batch-mode spotless:check
+
       - name: Build and run tests
         working-directory: ${{ matrix.service }}
         run: mvn --batch-mode verify

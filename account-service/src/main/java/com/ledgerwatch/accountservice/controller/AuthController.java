@@ -19,23 +19,27 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/auth")
 public class AuthController {
 
-    private final AuthService authService;
+  private final AuthService authService;
 
-    public AuthController(AuthService authService) {
-        this.authService = authService;
-    }
+  public AuthController(AuthService authService) {
+    this.authService = authService;
+  }
 
-    @PostMapping("/login")
-    @Operation(summary = "Log in and obtain a bearer token")
-    @ApiResponses({
-        @ApiResponse(responseCode = "200", description = "Login succeeded"),
-        @ApiResponse(responseCode = "400", description = "Validation failed",
-            content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
-        @ApiResponse(responseCode = "401", description = "Invalid username or password",
-            content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
-    })
-    public LoginResponse login(@Valid @RequestBody LoginRequest request) {
-        AuthService.LoginResult result = authService.login(request.username(), request.password());
-        return new LoginResponse(result.token(), "Bearer", result.expiresIn());
-    }
+  @PostMapping("/login")
+  @Operation(summary = "Log in and obtain a bearer token")
+  @ApiResponses({
+    @ApiResponse(responseCode = "200", description = "Login succeeded"),
+    @ApiResponse(
+        responseCode = "400",
+        description = "Validation failed",
+        content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+    @ApiResponse(
+        responseCode = "401",
+        description = "Invalid username or password",
+        content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
+  })
+  public LoginResponse login(@Valid @RequestBody LoginRequest request) {
+    AuthService.LoginResult result = authService.login(request.username(), request.password());
+    return new LoginResponse(result.token(), "Bearer", result.expiresIn());
+  }
 }
