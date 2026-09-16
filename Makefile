@@ -1,4 +1,4 @@
-.PHONY: build test up down logs psql migrate fmt
+.PHONY: build test up down logs psql migrate fmt fmt-check
 
 # Backend: Maven multi-module reactor (account-service, transaction-service).
 # Frontend: Vite/React app under ./frontend.
@@ -39,7 +39,9 @@ migrate:
 		-Dflyway.user=$(FLYWAY_USER) \
 		-Dflyway.password=$(FLYWAY_PASSWORD)
 
-# No Java formatter is configured yet (no Spotless/Checkstyle) — this only
-# formats the frontend for now.
 fmt:
+	mvn spotless:apply
 	npm --prefix frontend run lint -- --fix
+
+fmt-check:
+	mvn spotless:check
