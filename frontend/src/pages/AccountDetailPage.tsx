@@ -14,18 +14,18 @@ export default function AccountDetailPage() {
     const [ownerName, setOwnerName] = useState('');
     const [status, setStatus] = useState<AccountStatus>('ACTIVE');
     const [editing, setEditing] = useState(false);
+    const [syncedAccountId, setSyncedAccountId] = useState<string | undefined>(undefined);
 
     useEffect(() => {
         if (id) dispatch(fetchAccountById(id));
     }, [id, dispatch]);
 
     // sync form fields when account loads
-    useEffect(() => {
-        if (account) {
-            setOwnerName(account.ownerName);
-            setStatus(account.status);
-        }
-    }, [account]);
+    if (account && account.id !== syncedAccountId) {
+        setSyncedAccountId(account.id);
+        setOwnerName(account.ownerName);
+        setStatus(account.status);
+    }
 
     function handleSave() {
         if (!id) return;
