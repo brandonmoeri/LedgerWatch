@@ -35,7 +35,8 @@ public abstract class AbstractApiExceptionHandler {
   public ProblemDetail handleValidation(MethodArgumentNotValidException ex) {
     Map<String, String> fieldErrors =
         ex.getBindingResult().getFieldErrors().stream()
-            .collect(Collectors.toMap(FieldError::getField, fe -> fe.getDefaultMessage(), (a, b) -> a));
+            .collect(
+                Collectors.toMap(FieldError::getField, fe -> fe.getDefaultMessage(), (a, b) -> a));
     ProblemDetail problemDetail =
         ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, "Validation failed");
     problemDetail.setProperty("errors", fieldErrors);
