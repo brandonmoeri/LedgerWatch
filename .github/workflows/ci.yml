@@ -44,7 +44,11 @@ jobs:
           if [[ "${{ steps.filter.outputs['transaction-service'] }}" == 'true' || "${{ steps.filter.outputs.common }}" == 'true' ]]; then
             services+=("transaction-service")
           fi
-          json=$(printf '%s\n' "${services[@]}" | jq -R . | jq -sc .)
+          if [[ ${#services[@]} -eq 0 ]]; then
+            json='[]'
+          else
+            json=$(printf '%s\n' "${services[@]}" | jq -R . | jq -sc .)
+          fi
           echo "services=$json" >> "$GITHUB_OUTPUT"
 
   build-and-test:

@@ -3,7 +3,17 @@ import type { FormEvent } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { fetchTransactions } from '../store/transactionsSlice';
 import type { AppDispatch, RootState } from '../store/store';
-import type { TransactionStatus, TransactionType } from '../types/transaction';
+import type { Transaction, TransactionStatus, TransactionType } from '../types/transaction';
+import DataTable from '../components/DataTable';
+import type { DataTableColumn } from '../components/DataTable';
+
+const COLUMNS: DataTableColumn<Transaction>[] = [
+  { key: 'date', header: 'Date', render: (tx) => new Date(tx.createdAt).toLocaleDateString() },
+  { key: 'type', header: 'Type', render: (tx) => tx.type },
+  { key: 'status', header: 'Status', render: (tx) => tx.status },
+  { key: 'amount', header: 'Amount', render: (tx) => tx.amount },
+  { key: 'description', header: 'Description', render: (tx) => tx.description },
+];
 
 const SORT_OPTIONS = [
   { value: 'createdAt,desc', label: 'Newest first' },
@@ -113,44 +123,16 @@ export default function TransactionsPage() {
         <button type="submit">Search</button>
       </form>
 
-      {status === 'loading' && <p>Loading…</p>}
-      {status === 'failed' && <p>Error: {error}</p>}
-      {status === 'succeeded' && (
-        <>
-          <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Amount</th>
-                <th>Description</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((tx) => (
-                <tr key={tx.id}>
-                  <td>{new Date(tx.createdAt).toLocaleDateString()}</td>
-                  <td>{tx.type}</td>
-                  <td>{tx.status}</td>
-                  <td>{tx.amount}</td>
-                  <td>{tx.description}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          <div>
-            <button onClick={() => runSearch(Math.max(page - 1, 0), sort)} disabled={page === 0}>
-              Previous
-            </button>
-            <span>Page {page + 1} of {Math.max(totalPages, 1)}</span>
-            <button onClick={() => runSearch(page + 1, sort)} disabled={page + 1 >= totalPages}>
-              Next
-            </button>
-          </div>
-        </>
-      )}
+      <DataTable
+        columns={COLUMNS}
+        items={items}
+        getRowKey={(tx) => tx.id}
+        status={status}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        onPageChange={(nextPage) => runSearch(nextPage, sort)}
+      />
     </div>
   );
 }
