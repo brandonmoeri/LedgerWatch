@@ -92,6 +92,8 @@ class TransactionServiceTest {
             TransactionType.CREDIT,
             TransactionStatus.POSTED,
             null,
+            null,
+            null,
             pageable);
 
     assertThat(result.getContent()).containsExactly(existing);

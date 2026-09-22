@@ -4,6 +4,7 @@ import { store } from './store/store';
 import AccountDetailPage from './pages/AccountDetailPage';
 import CreateAccountPage from './pages/CreateAccountPage';
 import AccountsDashboardPage from './pages/AccountsDashboardPage';
+import TransactionsPage from './pages/TransactionsPage';
 import LoginPage from './pages/LoginPage';
 import RequireAuth from './auth/RequireAuth';
 
@@ -18,6 +19,7 @@ export default function App() {
             <Route path="/accounts" element={<AccountsDashboardPage />} />
             <Route path="/accounts/new" element={<CreateAccountPage />} />
             <Route path="/accounts/:id" element={<AccountDetailPage />} />
+            <Route path="/transactions" element={<TransactionsPage />} />
           </Route>
         </Routes>
       </BrowserRouter>

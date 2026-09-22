@@ -12,6 +12,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import jakarta.validation.Valid;
+import java.time.Instant;
 import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -48,18 +49,21 @@ public class TransactionController {
   @Operation(
       summary = "List transactions",
       description =
-          "Supports pagination (page, size), sorting (sort), and filtering by accountId, type, status, and description.")
+          "Supports pagination (page, size), sorting (sort), and filtering by accountId, type, "
+              + "status, description, and createdAt date range (createdFrom, createdTo).")
   @ApiResponse(responseCode = "200", description = "Transactions returned")
   public PagedModel<TransactionResponse> getAllTransactions(
       @RequestParam(required = false) UUID accountId,
       @RequestParam(required = false) TransactionType type,
       @RequestParam(required = false) TransactionStatus status,
       @RequestParam(required = false) String description,
+      @RequestParam(required = false) Instant createdFrom,
+      @RequestParam(required = false) Instant createdTo,
       @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC)
           Pageable pageable) {
     Page<TransactionResponse> page =
         transactionService
-            .getAll(accountId, type, status, description, pageable)
+            .getAll(accountId, type, status, description, createdFrom, createdTo, pageable)
             .map(TransactionResponse::from);
     return new PagedModel<>(page);
   }
