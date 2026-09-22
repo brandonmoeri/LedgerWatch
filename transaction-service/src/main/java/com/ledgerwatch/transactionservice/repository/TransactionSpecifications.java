@@ -3,6 +3,7 @@ package com.ledgerwatch.transactionservice.repository;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
+import java.time.Instant;
 import java.util.UUID;
 import org.springframework.data.jpa.domain.Specification;
 
@@ -30,11 +31,27 @@ public final class TransactionSpecifications {
             : cb.like(cb.lower(root.get("description")), "%" + description.toLowerCase() + "%");
   }
 
+  public static Specification<Transaction> createdFrom(Instant from) {
+    return (root, query, cb) ->
+        from == null ? null : cb.greaterThanOrEqualTo(root.get("createdAt"), from);
+  }
+
+  public static Specification<Transaction> createdTo(Instant to) {
+    return (root, query, cb) -> to == null ? null : cb.lessThanOrEqualTo(root.get("createdAt"), to);
+  }
+
   public static Specification<Transaction> filter(
-      UUID accountId, TransactionType type, TransactionStatus status, String description) {
+      UUID accountId,
+      TransactionType type,
+      TransactionStatus status,
+      String description,
+      Instant createdFrom,
+      Instant createdTo) {
     return Specification.where(hasAccountId(accountId))
         .and(hasType(type))
         .and(hasStatus(status))
-        .and(descriptionContains(description));
+        .and(descriptionContains(description))
+        .and(createdFrom(createdFrom))
+        .and(createdTo(createdTo));
   }
 }

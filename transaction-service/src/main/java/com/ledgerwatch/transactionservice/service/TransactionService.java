@@ -7,6 +7,7 @@ import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionSpecifications;
+import java.time.Instant;
 import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.UUID;
@@ -35,9 +36,13 @@ public class TransactionService {
       TransactionType type,
       TransactionStatus status,
       String description,
+      Instant createdFrom,
+      Instant createdTo,
       Pageable pageable) {
     return repo.findAll(
-        TransactionSpecifications.filter(accountId, type, status, description), pageable);
+        TransactionSpecifications.filter(
+            accountId, type, status, description, createdFrom, createdTo),
+        pageable);
   }
 
   @Transactional
