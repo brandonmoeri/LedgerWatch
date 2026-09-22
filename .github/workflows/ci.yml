@@ -29,6 +29,7 @@ jobs:
             frontend:
               - 'frontend/**'
             common:
+              - 'common/**'
               - 'pom.xml'
               - 'Makefile'
               - '.github/workflows/ci.yml'
@@ -68,12 +69,10 @@ jobs:
           cache: 'maven'
 
       - name: Check formatting
-        working-directory: ${{ matrix.service }}
-        run: mvn --batch-mode spotless:check
+        run: mvn --batch-mode -pl ${{ matrix.service }} -am spotless:check
 
       - name: Build and run tests
-        working-directory: ${{ matrix.service }}
-        run: mvn --batch-mode verify
+        run: mvn --batch-mode -pl ${{ matrix.service }} -am verify
 
       - name: Publish test results
         if: always()
