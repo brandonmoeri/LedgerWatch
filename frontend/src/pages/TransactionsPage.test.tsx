@@ -97,13 +97,18 @@ describe('TransactionsPage', () => {
             renderPage({ status: 'failed', error: 'Network Error' });
             expect(screen.queryByRole('table')).not.toBeInTheDocument();
         });
+
+        it('offers a retry action', () => {
+            renderPage({ status: 'failed', error: 'Network Error' });
+            expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+        });
     });
 
     describe('empty state', () => {
-        it('renders the table with only the header row', () => {
+        it('shows an empty state message instead of the table', () => {
             renderPage({ status: 'succeeded', items: [] });
-            expect(screen.getByRole('table')).toBeInTheDocument();
-            expect(screen.getAllByRole('row')).toHaveLength(1);
+            expect(screen.getByText(/no transactions found/i)).toBeInTheDocument();
+            expect(screen.queryByRole('table')).not.toBeInTheDocument();
         });
     });
 

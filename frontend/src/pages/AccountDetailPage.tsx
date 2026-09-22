@@ -4,12 +4,14 @@ import { Link, useParams } from 'react-router-dom';
 import { fetchAccountById, updateAccount } from '../store/accountsSlice';
 import type { AppDispatch, RootState } from '../store/store';
 import type { AccountStatus } from '../types/account';
+import Skeleton from '../components/Skeleton';
 
 export default function AccountDetailPage() {
     const { id } = useParams<{ id: string }>();
     const dispatch = useDispatch<AppDispatch>();
     const account = useSelector((s: RootState) => s.accounts.selectedAccount);
     const selectedStatus = useSelector((s: RootState) => s.accounts.selectedStatus);
+    const error = useSelector((s: RootState) => s.accounts.error);
 
     const [ownerName, setOwnerName] = useState('');
     const [status, setStatus] = useState<AccountStatus>('ACTIVE');
@@ -34,8 +36,30 @@ export default function AccountDetailPage() {
         );
     }
 
-    if (selectedStatus === 'loading' || !account) return <p>Loading…</p>;
-    if (selectedStatus === 'failed') return <p>Failed to load account.</p>;
+    if (selectedStatus === 'loading' || (selectedStatus === 'idle' && !account)) {
+        return (
+            <div aria-busy="true" aria-live="polite">
+                <span className="sr-only">Loading…</span>
+                <Link to="/accounts">← Back</Link>
+                <h1><Skeleton width="12rem" height="1.5em" /></h1>
+                <p><Skeleton width="8rem" /></p>
+                <p><Skeleton width="8rem" /></p>
+                <p><Skeleton width="12rem" /></p>
+            </div>
+        );
+    }
+
+    if (selectedStatus === 'failed') {
+        return (
+            <div role="alert" className="state-error">
+                <Link to="/accounts">← Back</Link>
+                <p>Error: {error ?? 'Failed to load account.'}</p>
+                {id && <button onClick={() => dispatch(fetchAccountById(id))}>Retry</button>}
+            </div>
+        );
+    }
+
+    if (!account) return null;
 
     return (
         <div>

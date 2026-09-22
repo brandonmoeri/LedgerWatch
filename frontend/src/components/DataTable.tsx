@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import Skeleton from './Skeleton';
 
 export interface DataTableColumn<T> {
   key: string;
@@ -17,7 +18,11 @@ interface DataTableProps<T> {
   page: number;
   totalPages: number;
   onPageChange: (page: number) => void;
+  onRetry?: () => void;
+  emptyMessage?: string;
 }
+
+const SKELETON_ROWS = 5;
 
 export default function DataTable<T>({
   columns,
@@ -28,17 +33,41 @@ export default function DataTable<T>({
   page,
   totalPages,
   onPageChange,
+  onRetry,
+  emptyMessage = 'No results found.',
 }: DataTableProps<T>) {
   if (status === 'loading') {
-    return <p>Loading…</p>;
+    return (
+      <div aria-busy="true" aria-live="polite">
+        <span className="sr-only">Loading…</span>
+        <div className="skeleton-table">
+          {Array.from({ length: SKELETON_ROWS }).map((_, rowIdx) => (
+            <div className="skeleton-row" key={rowIdx}>
+              {columns.map((col) => (
+                <Skeleton key={col.key} />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   }
 
   if (status === 'failed') {
-    return <p>Error: {error}</p>;
+    return (
+      <div role="alert" className="state-error">
+        <p>Error: {error}</p>
+        {onRetry && <button onClick={onRetry}>Retry</button>}
+      </div>
+    );
   }
 
   if (status !== 'succeeded') {
     return null;
+  }
+
+  if (items.length === 0) {
+    return <p className="state-empty">{emptyMessage}</p>;
   }
 
   return (

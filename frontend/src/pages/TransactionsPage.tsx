@@ -132,6 +132,8 @@ export default function TransactionsPage() {
         page={page}
         totalPages={totalPages}
         onPageChange={(nextPage) => runSearch(nextPage, sort)}
+        onRetry={() => runSearch(page, sort)}
+        emptyMessage="No transactions found."
       />
     </div>
   );
