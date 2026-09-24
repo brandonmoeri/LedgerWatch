@@ -9,13 +9,14 @@ import DataTable from '../components/DataTable';
 import type { DataTableColumn } from '../components/DataTable';
 
 const COLUMNS: DataTableColumn<Account>[] = [
-  { key: 'owner', header: 'Owner', render: (account) => account.ownerName },
+  { key: 'owner', header: 'Owner', render: (account) => account.ownerName, sortField: 'ownerName' },
   { key: 'status', header: 'Status', render: (account) => account.status },
-  { key: 'balance', header: 'Balance', render: (account) => account.balance },
+  { key: 'balance', header: 'Balance', render: (account) => account.balance, sortField: 'balance' },
   {
     key: 'created',
     header: 'Created',
     render: (account) => new Date(account.createdAt).toLocaleDateString(),
+    sortField: 'createdAt',
   },
   {
     key: 'view',
@@ -67,6 +68,14 @@ export default function AccountsDashboardPage() {
     runSearch(0, value);
   };
 
+  const [sortField, sortDirectionRaw] = sort.split(',');
+  const sortDirection = sortDirectionRaw === 'asc' ? 'asc' : 'desc';
+
+  const handleHeaderSort = (field: string) => {
+    const nextDirection = field === sortField && sortDirection === 'asc' ? 'desc' : 'asc';
+    handleSortChange(`${field},${nextDirection}`);
+  };
+
   return (
     <div>
       <h1>Accounts Dashboard</h1>
@@ -105,6 +114,7 @@ export default function AccountsDashboardPage() {
       </form>
 
       <DataTable
+        caption="Accounts"
         columns={COLUMNS}
         items={items}
         getRowKey={(account) => account.id}
@@ -115,6 +125,8 @@ export default function AccountsDashboardPage() {
         onPageChange={(nextPage) => runSearch(nextPage, sort)}
         onRetry={() => runSearch(page, sort)}
         emptyMessage="No accounts found."
+        sort={{ field: sortField, direction: sortDirection }}
+        onSortChange={handleHeaderSort}
       />
     </div>
   );

@@ -64,3 +64,27 @@
 .skeleton-cell {
   flex: 1;
 }
+
+.sort-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font: inherit;
+  font-weight: bold;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+.sort-button:focus-visible {
+  outline: 2px solid #1a5fb4;
+  outline-offset: 2px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}

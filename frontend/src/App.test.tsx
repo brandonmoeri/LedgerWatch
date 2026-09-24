@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
@@ -44,6 +44,17 @@ describe('App routing smoke tests', () => {
         expect(
             await screen.findByRole('heading', { name: /accounts dashboard/i })
         ).toBeInTheDocument();
+    });
+
+    it('moves focus to the main landmark after navigating to a new route', async() => {
+        render(<App />);
+
+        await screen.findByRole('heading', { name: /accounts dashboard/i });
+
+        fireEvent.click(screen.getByRole('link', { name: /new account/i }));
+
+        await screen.findByRole('heading', { name: /create account/i });
+        expect(screen.getByRole('main')).toHaveFocus();
     });
 
     it('renders the Account Detail loading state for "/accounts/:id"', () => {

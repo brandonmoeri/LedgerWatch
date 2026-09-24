@@ -8,10 +8,10 @@ import DataTable from '../components/DataTable';
 import type { DataTableColumn } from '../components/DataTable';
 
 const COLUMNS: DataTableColumn<Transaction>[] = [
-  { key: 'date', header: 'Date', render: (tx) => new Date(tx.createdAt).toLocaleDateString() },
+  { key: 'date', header: 'Date', render: (tx) => new Date(tx.createdAt).toLocaleDateString(), sortField: 'createdAt' },
   { key: 'type', header: 'Type', render: (tx) => tx.type },
   { key: 'status', header: 'Status', render: (tx) => tx.status },
-  { key: 'amount', header: 'Amount', render: (tx) => tx.amount },
+  { key: 'amount', header: 'Amount', render: (tx) => tx.amount, sortField: 'amount' },
   { key: 'description', header: 'Description', render: (tx) => tx.description },
 ];
 
@@ -66,6 +66,14 @@ export default function TransactionsPage() {
   const handleSortChange = (value: string) => {
     setSort(value);
     runSearch(0, value);
+  };
+
+  const [sortField, sortDirectionRaw] = sort.split(',');
+  const sortDirection = sortDirectionRaw === 'asc' ? 'asc' : 'desc';
+
+  const handleHeaderSort = (field: string) => {
+    const nextDirection = field === sortField && sortDirection === 'asc' ? 'desc' : 'asc';
+    handleSortChange(`${field},${nextDirection}`);
   };
 
   return (
@@ -124,6 +132,7 @@ export default function TransactionsPage() {
       </form>
 
       <DataTable
+        caption="Transactions"
         columns={COLUMNS}
         items={items}
         getRowKey={(tx) => tx.id}
@@ -134,6 +143,8 @@ export default function TransactionsPage() {
         onPageChange={(nextPage) => runSearch(nextPage, sort)}
         onRetry={() => runSearch(page, sort)}
         emptyMessage="No transactions found."
+        sort={{ field: sortField, direction: sortDirection }}
+        onSortChange={handleHeaderSort}
       />
     </div>
   );
