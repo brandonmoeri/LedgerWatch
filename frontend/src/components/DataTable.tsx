@@ -1,15 +1,26 @@
 import type { ReactNode } from 'react';
 import Skeleton from './Skeleton';
 
+export type SortDirection = 'asc' | 'desc';
+
+export interface DataTableSort {
+  field: string;
+  direction: SortDirection;
+}
+
 export interface DataTableColumn<T> {
   key: string;
   header: ReactNode;
   render: (item: T) => ReactNode;
+  /** API field this column sorts by. Omit to leave the column unsortable. */
+  sortField?: string;
 }
 
 export type DataTableStatus = 'idle' | 'loading' | 'succeeded' | 'failed';
 
 interface DataTableProps<T> {
+  /** Accessible name for the table, used as a visually-hidden <caption>. */
+  caption: string;
   columns: DataTableColumn<T>[];
   items: T[];
   getRowKey: (item: T) => string;
@@ -20,11 +31,24 @@ interface DataTableProps<T> {
   onPageChange: (page: number) => void;
   onRetry?: () => void;
   emptyMessage?: string;
+  sort?: DataTableSort;
+  onSortChange?: (field: string) => void;
 }
 
 const SKELETON_ROWS = 5;
 
+function ariaSortFor(sortField: string | undefined, sort?: DataTableSort): 'ascending' | 'descending' | 'none' | undefined {
+  if (!sortField) {
+    return undefined;
+  }
+  if (sort?.field !== sortField) {
+    return 'none';
+  }
+  return sort.direction === 'asc' ? 'ascending' : 'descending';
+}
+
 export default function DataTable<T>({
+  caption,
   columns,
   items,
   getRowKey,
@@ -35,6 +59,8 @@ export default function DataTable<T>({
   onPageChange,
   onRetry,
   emptyMessage = 'No results found.',
+  sort,
+  onSortChange,
 }: DataTableProps<T>) {
   if (status === 'loading') {
     return (
@@ -73,11 +99,31 @@ export default function DataTable<T>({
   return (
     <>
       <table>
+        <caption className="sr-only">{caption}</caption>
         <thead>
           <tr>
-            {columns.map((col) => (
-              <th key={col.key}>{col.header}</th>
-            ))}
+            {columns.map((col) => {
+              const sortable = Boolean(col.sortField && onSortChange);
+              const ariaSort = ariaSortFor(col.sortField, sort);
+              return (
+                <th key={col.key} scope="col" aria-sort={ariaSort}>
+                  {sortable ? (
+                    <button
+                      type="button"
+                      className="sort-button"
+                      onClick={() => onSortChange!(col.sortField!)}
+                    >
+                      {col.header}
+                      <span aria-hidden="true" className="sort-indicator">
+                        {ariaSort === 'ascending' ? ' ▲' : ariaSort === 'descending' ? ' ▼' : ''}
+                      </span>
+                    </button>
+                  ) : (
+                    col.header
+                  )}
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>
@@ -91,15 +137,15 @@ export default function DataTable<T>({
         </tbody>
       </table>
 
-      <div>
+      <nav className="pagination" aria-label="Pagination">
         <button onClick={() => onPageChange(Math.max(page - 1, 0))} disabled={page === 0}>
           Previous
         </button>
-        <span>Page {page + 1} of {Math.max(totalPages, 1)}</span>
+        <span aria-live="polite" aria-atomic="true">Page {page + 1} of {Math.max(totalPages, 1)}</span>
         <button onClick={() => onPageChange(page + 1)} disabled={page + 1 >= totalPages}>
           Next
         </button>
-      </div>
+      </nav>
     </>
   );
 }
