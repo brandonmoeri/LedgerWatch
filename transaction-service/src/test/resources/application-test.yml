@@ -1,5 +1,4 @@
-spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/ledgerwatch
-    username: ledger
-    password: ledger
+# Datasource connection details are injected by Testcontainers via @ServiceConnection
+# (see TestcontainersConfiguration) — do not hardcode spring.datasource here.
+jwt:
+  secret: "test-secret-that-is-exactly-32b!!"

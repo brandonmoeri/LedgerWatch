@@ -1,10 +1,19 @@
 package com.ledgerwatch.accountservice.service;
 
+import static org.assertj.core.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+
 import com.ledgerwatch.accountservice.domain.Account;
 import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.Optional;
+import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -18,149 +27,142 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
 
-import java.math.BigDecimal;
-import java.util.List;
-import java.util.NoSuchElementException;
-import java.util.Optional;
-import java.util.UUID;
-
-import static org.assertj.core.api.Assertions.*;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.*;
-
 @SuppressWarnings("null")
 @ExtendWith(MockitoExtension.class)
 public class AccountServiceTest {
-    
-    @Mock
-    AccountRepository accountRepository;
 
-    @InjectMocks
-    AccountService accountService;
+  @Mock AccountRepository accountRepository;
 
-    private Account existing;
-    private UUID existingId;
+  @InjectMocks AccountService accountService;
 
-    @BeforeEach
-    void setUp() {
-        existingId = UUID.randomUUID();
-        existing = new Account();
-        existing.setOwnerName("Alice");
-    }
+  private Account existing;
+  private UUID existingId;
 
-    // --- create ---
+  @BeforeEach
+  void setUp() {
+    existingId = UUID.randomUUID();
+    existing = new Account();
+    existing.setOwnerName("Alice");
+  }
 
-    @Test
-    void create_persistsAccountWithOwnerName() {
-        when(accountRepository.save(any(Account.class))).thenAnswer(inv -> inv.getArgument(0, Account.class));
+  // --- create ---
 
-        Account result = accountService.createAccount(new CreateAccountRequest("Alice", null));
+  @Test
+  void create_persistsAccountWithOwnerName() {
+    when(accountRepository.save(any(Account.class)))
+        .thenAnswer(inv -> inv.getArgument(0, Account.class));
 
-        assertThat(result.getOwnerName()).isEqualTo("Alice");
-        assertThat(result.getBalance()).isEqualByComparingTo(BigDecimal.ZERO);
-        assertThat(result.getStatus()).isEqualTo(AccountStatus.ACTIVE);
-        verify(accountRepository).save(any(Account.class));
-    }
+    Account result = accountService.createAccount(new CreateAccountRequest("Alice", null));
 
-    @Test
-    void create_setsInitialBalanceWhenProvided() {
-        when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+    assertThat(result.getOwnerName()).isEqualTo("Alice");
+    assertThat(result.getBalance()).isEqualByComparingTo(BigDecimal.ZERO);
+    assertThat(result.getStatus()).isEqualTo(AccountStatus.ACTIVE);
+    verify(accountRepository).save(any(Account.class));
+  }
 
-        Account result = accountService.createAccount(new CreateAccountRequest("Bob", new BigDecimal("500.00")));
+  @Test
+  void create_setsInitialBalanceWhenProvided() {
+    when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        assertThat(result.getBalance()).isEqualByComparingTo("500.00");
-    }
+    Account result =
+        accountService.createAccount(new CreateAccountRequest("Bob", new BigDecimal("500.00")));
 
-    @Test
-    void create_rejectsNegativeInitialBalance() {
-        assertThatThrownBy(() ->
-            accountService.createAccount(new CreateAccountRequest("Charlie", new BigDecimal("-100.00")))
-        ).isInstanceOf(IllegalArgumentException.class)
-         .hasMessageContaining("Initial balance cannot be negative");
+    assertThat(result.getBalance()).isEqualByComparingTo("500.00");
+  }
 
-        verifyNoInteractions(accountRepository);
-    }
+  @Test
+  void create_rejectsNegativeInitialBalance() {
+    assertThatThrownBy(
+            () ->
+                accountService.createAccount(
+                    new CreateAccountRequest("Charlie", new BigDecimal("-100.00"))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Initial balance cannot be negative");
 
-    // --- getById ---
+    verifyNoInteractions(accountRepository);
+  }
 
-    @Test
-    void getById_returnsAccountWhenFound() {
-        when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+  // --- getById ---
 
-        Account result = accountService.getById(existingId);
+  @Test
+  void getById_returnsAccountWhenFound() {
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
 
-        assertThat(result).isSameAs(existing);
-    }
+    Account result = accountService.getById(existingId);
 
-    @Test
-    void getById_throwsWhenNotFound() {
-        UUID unknown = UUID.randomUUID();
-        when(accountRepository.findById(unknown)).thenReturn(Optional.empty());
+    assertThat(result).isSameAs(existing);
+  }
 
-        assertThatThrownBy(() -> accountService.getById(unknown))
-            .isInstanceOf(NoSuchElementException.class)
-            .hasMessageContaining(unknown.toString());
-    }
+  @Test
+  void getById_throwsWhenNotFound() {
+    UUID unknown = UUID.randomUUID();
+    when(accountRepository.findById(unknown)).thenReturn(Optional.empty());
 
-    // --- getAll ---
+    assertThatThrownBy(() -> accountService.getById(unknown))
+        .isInstanceOf(NoSuchElementException.class)
+        .hasMessageContaining(unknown.toString());
+  }
 
-    @Test
-    void getAll_delegatesToRepositoryWithSpecificationAndPageable() {
-        Pageable pageable = PageRequest.of(0, 10);
-        Page<Account> page = new PageImpl<>(List.of(existing));
-        when(accountRepository.findAll(ArgumentMatchers.<Specification<Account>>any(), eq(pageable)))
-            .thenReturn(page);
+  // --- getAll ---
 
-        Page<Account> result = accountService.getAll(AccountStatus.ACTIVE, "Ali", pageable);
+  @Test
+  void getAll_delegatesToRepositoryWithSpecificationAndPageable() {
+    Pageable pageable = PageRequest.of(0, 10);
+    Page<Account> page = new PageImpl<>(List.of(existing));
+    when(accountRepository.findAll(ArgumentMatchers.<Specification<Account>>any(), eq(pageable)))
+        .thenReturn(page);
 
-        assertThat(result.getContent()).containsExactly(existing);
-        verify(accountRepository).findAll(ArgumentMatchers.<Specification<Account>>any(), eq(pageable));
-    }
+    Page<Account> result = accountService.getAll(AccountStatus.ACTIVE, "Ali", pageable);
 
-    // --- update ---
+    assertThat(result.getContent()).containsExactly(existing);
+    verify(accountRepository).findAll(ArgumentMatchers.<Specification<Account>>any(), eq(pageable));
+  }
 
-    @Test
-    void update_patchesOwnerName() {
-        when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
-        when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+  // --- update ---
 
-        Account result = accountService.updateAccount(existingId,
-            new UpdateAccountRequest("Alice Renamed", null));
+  @Test
+  void update_patchesOwnerName() {
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        assertThat(result.getOwnerName()).isEqualTo("Alice Renamed");
-        assertThat(result.getStatus()).isEqualTo(AccountStatus.ACTIVE); // unchanged
-    }
+    Account result =
+        accountService.updateAccount(existingId, new UpdateAccountRequest("Alice Renamed", null));
 
-    @Test
-    void update_patchesStatus() {
-        when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
-        when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+    assertThat(result.getOwnerName()).isEqualTo("Alice Renamed");
+    assertThat(result.getStatus()).isEqualTo(AccountStatus.ACTIVE); // unchanged
+  }
 
-        Account result = accountService.updateAccount(existingId,
-            new UpdateAccountRequest(null, AccountStatus.FROZEN));
+  @Test
+  void update_patchesStatus() {
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        assertThat(result.getStatus()).isEqualTo(AccountStatus.FROZEN);
-        assertThat(result.getOwnerName()).isEqualTo("Alice"); // unchanged
-    }
+    Account result =
+        accountService.updateAccount(
+            existingId, new UpdateAccountRequest(null, AccountStatus.FROZEN));
 
-    @Test
-    void update_throwsWhenAccountNotFound() {
-        UUID unknown = UUID.randomUUID();
-        when(accountRepository.findById(unknown)).thenReturn(Optional.empty());
+    assertThat(result.getStatus()).isEqualTo(AccountStatus.FROZEN);
+    assertThat(result.getOwnerName()).isEqualTo("Alice"); // unchanged
+  }
 
-        assertThatThrownBy(() ->
-            accountService.updateAccount(unknown, new UpdateAccountRequest("X", null))
-        ).isInstanceOf(NoSuchElementException.class);
-    }
+  @Test
+  void update_throwsWhenAccountNotFound() {
+    UUID unknown = UUID.randomUUID();
+    when(accountRepository.findById(unknown)).thenReturn(Optional.empty());
 
-    @Test
-    void update_ignoresBlankOwnerName() {
-        when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
-        when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+    assertThatThrownBy(
+            () -> accountService.updateAccount(unknown, new UpdateAccountRequest("X", null)))
+        .isInstanceOf(NoSuchElementException.class);
+  }
 
-        Account result = accountService.updateAccount(existingId,
-            new UpdateAccountRequest("   ", null));
+  @Test
+  void update_ignoresBlankOwnerName() {
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
 
-        assertThat(result.getOwnerName()).isEqualTo("Alice"); // untouched
-    }
+    Account result =
+        accountService.updateAccount(existingId, new UpdateAccountRequest("   ", null));
+
+    assertThat(result.getOwnerName()).isEqualTo("Alice"); // untouched
+  }
 }

@@ -4,7 +4,26 @@ import { useDispatch, useSelector } from 'react-redux';
 import { Link } from 'react-router-dom';
 import { fetchAccounts } from '../store/accountsSlice';
 import type { AppDispatch, RootState } from '../store/store';
-import type { AccountStatus } from '../types/account';
+import type { Account, AccountStatus } from '../types/account';
+import DataTable from '../components/DataTable';
+import type { DataTableColumn } from '../components/DataTable';
+
+const COLUMNS: DataTableColumn<Account>[] = [
+  { key: 'owner', header: 'Owner', render: (account) => account.ownerName, sortField: 'ownerName' },
+  { key: 'status', header: 'Status', render: (account) => account.status },
+  { key: 'balance', header: 'Balance', render: (account) => account.balance, sortField: 'balance' },
+  {
+    key: 'created',
+    header: 'Created',
+    render: (account) => new Date(account.createdAt).toLocaleDateString(),
+    sortField: 'createdAt',
+  },
+  {
+    key: 'view',
+    header: '',
+    render: (account) => <Link to={`/accounts/${account.id}`}>View</Link>,
+  },
+];
 
 const SORT_OPTIONS = [
   { value: 'createdAt,desc', label: 'Newest first' },
@@ -49,6 +68,14 @@ export default function AccountsDashboardPage() {
     runSearch(0, value);
   };
 
+  const [sortField, sortDirectionRaw] = sort.split(',');
+  const sortDirection = sortDirectionRaw === 'asc' ? 'asc' : 'desc';
+
+  const handleHeaderSort = (field: string) => {
+    const nextDirection = field === sortField && sortDirection === 'asc' ? 'desc' : 'asc';
+    handleSortChange(`${field},${nextDirection}`);
+  };
+
   return (
     <div>
       <h1>Accounts Dashboard</h1>
@@ -86,46 +113,21 @@ export default function AccountsDashboardPage() {
         <button type="submit">Search</button>
       </form>
 
-      {status === 'loading' && <p>Loading…</p>}
-      {status === 'failed' && <p>Error: {error}</p>}
-      {status === 'succeeded' && (
-        <>
-          <table>
-            <thead>
-              <tr>
-                <th>Owner</th>
-                <th>Status</th>
-                <th>Balance</th>
-                <th>Created</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((account) => (
-                <tr key={account.id}>
-                  <td>{account.ownerName}</td>
-                  <td>{account.status}</td>
-                  <td>{account.balance}</td>
-                  <td>{new Date(account.createdAt).toLocaleDateString()}</td>
-                  <td>
-                    <Link to={`/accounts/${account.id}`}>View</Link>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          <div>
-            <button onClick={() => runSearch(Math.max(page - 1, 0), sort)} disabled={page === 0}>
-              Previous
-            </button>
-            <span>Page {page + 1} of {Math.max(totalPages, 1)}</span>
-            <button onClick={() => runSearch(page + 1, sort)} disabled={page + 1 >= totalPages}>
-              Next
-            </button>
-          </div>
-        </>
-      )}
+      <DataTable
+        caption="Accounts"
+        columns={COLUMNS}
+        items={items}
+        getRowKey={(account) => account.id}
+        status={status}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        onPageChange={(nextPage) => runSearch(nextPage, sort)}
+        onRetry={() => runSearch(page, sort)}
+        emptyMessage="No accounts found."
+        sort={{ field: sortField, direction: sortDirection }}
+        onSortChange={handleHeaderSort}
+      />
     </div>
   );
 }

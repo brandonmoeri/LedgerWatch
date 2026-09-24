@@ -45,6 +45,7 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/ledgerwatch
       DB_USERNAME: ledger
       DB_PASSWORD: ledger
+      JWT_SECRET: ${JWT_SECRET}
     ports:
       - "8082:8082"
 

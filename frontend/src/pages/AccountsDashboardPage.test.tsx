@@ -96,14 +96,18 @@ describe('AccountsDashboardPage', () => {
             renderDashboard({ status: 'failed', error: 'Network Error' });
             expect(screen.queryByRole('table')).not.toBeInTheDocument();
         })
+
+        it('offers a retry action', () => {
+            renderDashboard({ status: 'failed', error: 'Network Error' });
+            expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+        })
     });
 
     describe('empty state', () => {
-        it('renders the table with only the header row', () => {
+        it('shows an empty state message instead of the table', () => {
             renderDashboard({ status: 'succeeded', items: [] });
-            expect(screen.getByRole('table')).toBeInTheDocument();
-            // Only the thead <tr> is present; no data rows
-            expect(screen.getAllByRole('row')).toHaveLength(1);
+            expect(screen.getByText(/no accounts found/i)).toBeInTheDocument();
+            expect(screen.queryByRole('table')).not.toBeInTheDocument();
         });
 
         it('does not show a loading or error message', () => {

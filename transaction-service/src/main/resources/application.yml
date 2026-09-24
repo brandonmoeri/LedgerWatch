@@ -18,3 +18,15 @@ spring:
   flyway:
     schemas: transactions
     default-schema: transactions
+
+jwt:
+  secret: ${JWT_SECRET}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+  endpoint:
+    health:
+      show-details: never
