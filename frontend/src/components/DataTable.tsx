@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { ReactNode } from 'react';
 import Skeleton from './Skeleton';
 
@@ -47,7 +48,7 @@ function ariaSortFor(sortField: string | undefined, sort?: DataTableSort): 'asce
   return sort.direction === 'asc' ? 'ascending' : 'descending';
 }
 
-export default function DataTable<T>({
+function DataTableInner<T>({
   caption,
   columns,
   items,
@@ -149,3 +150,9 @@ export default function DataTable<T>({
     </>
   );
 }
+
+// memo() erases the generic signature, so it's cast back to DataTableInner's
+// type. Consumers still get a properly generic <DataTable<T> /> component.
+const DataTable = memo(DataTableInner) as typeof DataTableInner;
+
+export default DataTable;
