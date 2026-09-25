@@ -57,6 +57,15 @@ describe('App routing smoke tests', () => {
         expect(screen.getByRole('main')).toHaveFocus();
     });
 
+    it('renders the NotFoundPage for an unknown route', async() => {
+        window.history.pushState({}, '', '/does-not-exist');
+        render(<App />);
+
+        expect(
+            await screen.findByRole('heading', { name: /page not found/i })
+        ).toBeInTheDocument();
+    });
+
     it('renders the Account Detail loading state for "/accounts/:id"', () => {
         const store = configureStore({ reducer: { accounts: accountsReducer }});
         const router = createMemoryRouter(
