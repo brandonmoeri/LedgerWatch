@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { Link } from 'react-router-dom';
@@ -6,7 +6,8 @@ import { fetchAccounts } from '../store/accountsSlice';
 import type { AppDispatch, RootState } from '../store/store';
 import type { Account, AccountStatus } from '../types/account';
 import DataTable from '../components/DataTable';
-import type { DataTableColumn } from '../components/DataTable';
+import type { DataTableColumn, DataTableSort } from '../components/DataTable';
+import { useStableCallback } from '../hooks/useStableCallback';
 
 const COLUMNS: DataTableColumn<Account>[] = [
   { key: 'owner', header: 'Owner', render: (account) => account.ownerName, sortField: 'ownerName' },
@@ -71,10 +72,20 @@ export default function AccountsDashboardPage() {
   const [sortField, sortDirectionRaw] = sort.split(',');
   const sortDirection = sortDirectionRaw === 'asc' ? 'asc' : 'desc';
 
-  const handleHeaderSort = (field: string) => {
+  const handleHeaderSort = useStableCallback((field: string) => {
     const nextDirection = field === sortField && sortDirection === 'asc' ? 'desc' : 'asc';
     handleSortChange(`${field},${nextDirection}`);
-  };
+  });
+
+  // Stable identities so DataTable (React.memo'd) doesn't re-render its rows
+  // whenever unrelated page state (e.g. filter text) changes.
+  const handlePageChange = useStableCallback((nextPage: number) => runSearch(nextPage, sort));
+  const handleRetry = useStableCallback(() => runSearch(page, sort));
+  const getRowKey = useCallback((account: Account) => account.id, []);
+  const tableSort = useMemo<DataTableSort>(
+    () => ({ field: sortField, direction: sortDirection }),
+    [sortField, sortDirection]
+  );
 
   return (
     <div>
@@ -117,15 +128,15 @@ export default function AccountsDashboardPage() {
         caption="Accounts"
         columns={COLUMNS}
         items={items}
-        getRowKey={(account) => account.id}
+        getRowKey={getRowKey}
         status={status}
         error={error}
         page={page}
         totalPages={totalPages}
-        onPageChange={(nextPage) => runSearch(nextPage, sort)}
-        onRetry={() => runSearch(page, sort)}
+        onPageChange={handlePageChange}
+        onRetry={handleRetry}
         emptyMessage="No accounts found."
-        sort={{ field: sortField, direction: sortDirection }}
+        sort={tableSort}
         onSortChange={handleHeaderSort}
       />
     </div>
