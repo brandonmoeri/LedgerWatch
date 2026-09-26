@@ -3,6 +3,7 @@ package com.ledgerwatch.transactionservice.controller;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
+import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse;
 import com.ledgerwatch.transactionservice.dto.TransactionResponse;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
 import com.ledgerwatch.transactionservice.service.TransactionService;
@@ -66,6 +67,21 @@ public class TransactionController {
             .getAll(accountId, type, status, description, createdFrom, createdTo, pageable)
             .map(TransactionResponse::from);
     return new PagedModel<>(page);
+  }
+
+  @GetMapping("/summary")
+  @Operation(
+      summary = "Get dashboard summary aggregates",
+      description =
+          "Computes balance-over-time (cumulative daily net of posted transactions) and total "
+              + "spend by transaction type, optionally filtered by accountId and a createdAt "
+              + "date range (createdFrom, createdTo). Only POSTED transactions are included.")
+  @ApiResponse(responseCode = "200", description = "Summary computed")
+  public DashboardSummaryResponse getDashboardSummary(
+      @RequestParam(required = false) UUID accountId,
+      @RequestParam(required = false) Instant createdFrom,
+      @RequestParam(required = false) Instant createdTo) {
+    return transactionService.getDashboardSummary(accountId, createdFrom, createdTo);
   }
 
   @PostMapping

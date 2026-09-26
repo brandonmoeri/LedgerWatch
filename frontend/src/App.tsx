@@ -6,6 +6,7 @@ import AccountDetailPage from './pages/AccountDetailPage';
 import CreateAccountPage from './pages/CreateAccountPage';
 import AccountsDashboardPage from './pages/AccountsDashboardPage';
 import TransactionsPage from './pages/TransactionsPage';
+import DashboardPage from './pages/DashboardPage';
 import LoginPage from './pages/LoginPage';
 import NotFoundPage from './pages/NotFoundPage';
 import RequireAuth from './auth/RequireAuth';
@@ -37,6 +38,7 @@ function AppRoutes() {
             <Route path="/accounts/new" element={<CreateAccountPage />} />
             <Route path="/accounts/:id" element={<AccountDetailPage />} />
             <Route path="/transactions" element={<TransactionsPage />} />
+            <Route path="/dashboard" element={<DashboardPage />} />
           </Route>
           <Route path="*" element={<NotFoundPage />} />
         </Routes>

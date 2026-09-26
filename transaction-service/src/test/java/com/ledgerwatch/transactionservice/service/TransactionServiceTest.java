@@ -8,9 +8,12 @@ import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
+import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -26,6 +29,7 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 
 @SuppressWarnings("null")
@@ -124,6 +128,55 @@ class TransactionServiceTest {
 
     assertThat(result.getDescription()).isEqualTo("corrected memo");
     assertThat(result.getStatus()).isEqualTo(TransactionStatus.POSTED); // unchanged
+  }
+
+  @Test
+  void getDashboardSummary_computesCumulativeBalanceAndTotalsByType() {
+    UUID accountId = existing.getAccountId();
+    Instant day1 = Instant.parse("2026-01-01T10:00:00Z");
+    Instant day2 = day1.plus(1, ChronoUnit.DAYS);
+
+    Transaction credit = new Transaction();
+    credit.setAccountId(accountId);
+    credit.setType(TransactionType.CREDIT);
+    credit.setStatus(TransactionStatus.POSTED);
+    credit.setAmount(new BigDecimal("100.00"));
+    setCreatedAt(credit, day1);
+
+    Transaction debit = new Transaction();
+    debit.setAccountId(accountId);
+    debit.setType(TransactionType.DEBIT);
+    debit.setStatus(TransactionStatus.POSTED);
+    debit.setAmount(new BigDecimal("30.00"));
+    setCreatedAt(debit, day2);
+
+    when(transactionRepository.findAll(
+            ArgumentMatchers.<Specification<Transaction>>any(), any(Sort.class)))
+        .thenReturn(List.of(credit, debit));
+
+    DashboardSummaryResponse summary =
+        transactionService.getDashboardSummary(accountId, null, null);
+
+    assertThat(summary.balanceOverTime()).hasSize(2);
+    assertThat(summary.balanceOverTime().get(0).balance()).isEqualByComparingTo("100.00");
+    assertThat(summary.balanceOverTime().get(1).balance()).isEqualByComparingTo("70.00");
+
+    assertThat(summary.spendByType()).hasSize(2);
+    var creditSummary =
+        summary.spendByType().stream().filter(s -> s.type() == TransactionType.CREDIT).findFirst();
+    assertThat(creditSummary).isPresent();
+    assertThat(creditSummary.get().total()).isEqualByComparingTo("100.00");
+    assertThat(creditSummary.get().count()).isEqualTo(1);
+  }
+
+  private static void setCreatedAt(Transaction tx, Instant createdAt) {
+    try {
+      var field = Transaction.class.getDeclaredField("createdAt");
+      field.setAccessible(true);
+      field.set(tx, createdAt);
+    } catch (ReflectiveOperationException e) {
+      throw new RuntimeException(e);
+    }
   }
 
   @Test

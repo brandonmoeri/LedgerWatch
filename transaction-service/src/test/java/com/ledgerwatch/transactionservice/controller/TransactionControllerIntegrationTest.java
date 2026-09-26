@@ -124,6 +124,23 @@ class TransactionControllerIntegrationTest {
   }
 
   @Test
+  void getDashboardSummary_returnsBalanceOverTimeAndSpendByType() throws Exception {
+    var accountId = UUID.randomUUID();
+    createTransaction(accountId, TransactionType.CREDIT, new BigDecimal("200.00"), "salary");
+    createTransaction(accountId, TransactionType.DEBIT, new BigDecimal("50.00"), "groceries");
+    // different account: must not affect the filtered summary
+    createTransaction(
+        UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("999.00"), "other account");
+
+    mockMvc
+        .perform(get("/transactions/summary").with(jwt()).param("accountId", accountId.toString()))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.balanceOverTime.length()").value(1))
+        .andExpect(jsonPath("$.balanceOverTime[0].balance").value(150.00))
+        .andExpect(jsonPath("$.spendByType.length()").value(2));
+  }
+
+  @Test
   void updateTransaction_alreadyVoided_returns409() throws Exception {
     var id = createTransaction();
     var void1 =
