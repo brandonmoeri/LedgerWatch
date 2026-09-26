@@ -91,6 +91,8 @@ export default function AccountsDashboardPage() {
     <div>
       <h1>Accounts Dashboard</h1>
       <Link to="/accounts/new">+ New Account</Link>
+      {' | '}
+      <Link to="/dashboard">View spending dashboard</Link>
 
       <form onSubmit={handleSearchSubmit}>
         <label>
