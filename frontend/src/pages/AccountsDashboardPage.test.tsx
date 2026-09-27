@@ -2,20 +2,11 @@ import { render, screen, act } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
 import { configureStore } from '@reduxjs/toolkit';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, afterEach } from 'vitest';
 import AccountsDashboardPage from './AccountsDashboardPage';
 import accountsReducer from '../store/accountsSlice';
 import { accountsApi } from '../api/accounts';
 import type { Account } from '../types/account';
-
-vi.mock('../api/accounts', () => ({
-    accountsApi: {
-        getAll: vi.fn(),
-        getById: vi.fn(),
-        create: vi.fn(),
-        update: vi.fn(),
-    },
-}));
 
 const mockAccount: Account = {
     id: 'acc-1',
@@ -62,6 +53,10 @@ function renderDashboard(overrides: {
 }
 
 describe('AccountsDashboardPage', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
     describe('chrome always present', () => {
         it('renders the page heading', () => {
             renderDashboard();
@@ -154,16 +149,10 @@ describe('AccountsDashboardPage', () => {
     });
 
     describe('idle state', () => {
-        beforeEach(() => {
-            vi.mocked(accountsApi.getAll).mockResolvedValue({
-                content: [],
-                page: { size: 20, number: 0, totalElements: 0, totalPages: 0 },
-            });
-        });
-
         it('dispatches fetchAccounts when status is idle', async () => {
+            const getAllSpy = vi.spyOn(accountsApi, 'getAll');
             await act(async () => renderDashboard({ status: 'idle' }));
-            expect(vi.mocked(accountsApi.getAll)).toHaveBeenCalledTimes(1);
+            expect(getAllSpy).toHaveBeenCalledTimes(1);
         });
     });
 

@@ -2,18 +2,11 @@ import { render, screen, act } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
 import { configureStore } from '@reduxjs/toolkit';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, afterEach } from 'vitest';
 import TransactionsPage from './TransactionsPage';
 import transactionsReducer from '../store/transactionsSlice';
 import { transactionsApi } from '../api/transactions';
 import type { Transaction } from '../types/transaction';
-
-vi.mock('../api/transactions', () => ({
-    transactionsApi: {
-        getAll: vi.fn(),
-        getById: vi.fn(),
-    },
-}));
 
 const mockTransaction: Transaction = {
     id: 'tx-1',
@@ -60,6 +53,10 @@ function renderPage(overrides: {
 }
 
 describe('TransactionsPage', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
     describe('chrome always present', () => {
         it('renders the page heading', () => {
             renderPage();
@@ -128,16 +125,10 @@ describe('TransactionsPage', () => {
     });
 
     describe('idle state', () => {
-        beforeEach(() => {
-            vi.mocked(transactionsApi.getAll).mockResolvedValue({
-                content: [],
-                page: { size: 20, number: 0, totalElements: 0, totalPages: 0 },
-            });
-        });
-
         it('dispatches fetchTransactions when status is idle', async () => {
+            const getAllSpy = vi.spyOn(transactionsApi, 'getAll');
             await act(async () => renderPage({ status: 'idle' }));
-            expect(vi.mocked(transactionsApi.getAll)).toHaveBeenCalledTimes(1);
+            expect(getAllSpy).toHaveBeenCalledTimes(1);
         });
     });
 

@@ -2,25 +2,15 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { configureStore } from '@reduxjs/toolkit';
 import { Provider } from 'react-redux';
 import { createMemoryRouter, RouterProvider } from 'react-router-dom';
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import App from './App';
 import AccountDetailPage from './pages/AccountDetailPage';
 import CreateAccountPage from './pages/CreateAccountPage';
 import accountsReducer from './store/accountsSlice';
 import { auth } from './auth/auth';
 
-// Prevent real HTTP calls from either page
-vi.mock('./api/accounts', () => ({
-    accountsApi: {
-        getAll: vi.fn(() => Promise.resolve({
-            content: [],
-            page: { size: 20, number: 0, totalElements: 0, totalPages: 0 },
-        })),
-        create: vi.fn(),
-        getById: vi.fn(() => new Promise(() => {})),
-        update: vi.fn(),
-    },
-}));
+// GET /api/accounts and GET /api/accounts/:id are served by the default MSW
+// handlers in src/test/msw/handlers.ts (empty page / never-resolving, respectively).
 
 function makeToken(exp: number): string {
     const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
