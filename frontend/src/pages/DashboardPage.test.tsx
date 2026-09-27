@@ -2,17 +2,11 @@ import { render, screen, act } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
 import { configureStore } from '@reduxjs/toolkit';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, afterEach } from 'vitest';
 import DashboardPage from './DashboardPage';
 import dashboardReducer from '../store/dashboardSlice';
 import { dashboardApi } from '../api/dashboard';
 import type { DashboardSummary } from '../types/dashboard';
-
-vi.mock('../api/dashboard', () => ({
-    dashboardApi: {
-        getSummary: vi.fn(),
-    },
-}));
 
 const mockSummary: DashboardSummary = {
     balanceOverTime: [
@@ -48,6 +42,10 @@ function renderPage(overrides: { summary?: DashboardSummary | null; status?: Sli
 }
 
 describe('DashboardPage', () => {
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
     describe('chrome always present', () => {
         it('renders the page heading', () => {
             renderPage();
@@ -93,13 +91,10 @@ describe('DashboardPage', () => {
     });
 
     describe('idle state', () => {
-        beforeEach(() => {
-            vi.mocked(dashboardApi.getSummary).mockResolvedValue({ balanceOverTime: [], spendByType: [] });
-        });
-
         it('dispatches fetchDashboardSummary when status is idle', async () => {
+            const getSummarySpy = vi.spyOn(dashboardApi, 'getSummary');
             await act(async () => renderPage({ status: 'idle' }));
-            expect(vi.mocked(dashboardApi.getSummary)).toHaveBeenCalledTimes(1);
+            expect(getSummarySpy).toHaveBeenCalledTimes(1);
         });
     });
 });
