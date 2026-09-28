@@ -1,4 +1,4 @@
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { Provider } from 'react-redux';
 import { MemoryRouter } from 'react-router-dom';
 import { configureStore } from '@reduxjs/toolkit';
@@ -145,6 +145,52 @@ describe('AccountsDashboardPage', () => {
             renderDashboard({ items: [mockAccount] });
             const expected = new Date(mockAccount.createdAt).toLocaleDateString();
             expect(screen.getByText(expected)).toBeInTheDocument();
+        });
+    });
+
+    describe('search and filter controls', () => {
+        it('submits the search with the selected status filter', async () => {
+            const getAllSpy = vi.spyOn(accountsApi, 'getAll');
+            renderDashboard();
+            fireEvent.change(screen.getByLabelText(/status/i), { target: { value: 'FROZEN' } });
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /^search$/i }));
+            });
+            expect(getAllSpy).toHaveBeenCalledWith(
+                expect.objectContaining({ status: 'FROZEN', page: 0 })
+            );
+        });
+
+        it('submits the search with the entered owner name filter', async () => {
+            const getAllSpy = vi.spyOn(accountsApi, 'getAll');
+            renderDashboard();
+            fireEvent.change(screen.getByLabelText(/owner name/i), { target: { value: 'Alice' } });
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /^search$/i }));
+            });
+            expect(getAllSpy).toHaveBeenCalledWith(
+                expect.objectContaining({ ownerName: 'Alice', page: 0 })
+            );
+        });
+
+        it('resets to the first page when submitting a search from a later page', async () => {
+            const getAllSpy = vi.spyOn(accountsApi, 'getAll');
+            renderDashboard({ items: [mockAccount], page: 2, totalPages: 3 });
+            await act(async () => {
+                fireEvent.click(screen.getByRole('button', { name: /^search$/i }));
+            });
+            expect(getAllSpy).toHaveBeenCalledWith(expect.objectContaining({ page: 0 }));
+        });
+
+        it('re-runs the search immediately when the sort option changes', async () => {
+            const getAllSpy = vi.spyOn(accountsApi, 'getAll');
+            renderDashboard();
+            await act(async () => {
+                fireEvent.change(screen.getByLabelText(/sort/i), { target: { value: 'balance,asc' } });
+            });
+            expect(getAllSpy).toHaveBeenCalledWith(
+                expect.objectContaining({ sort: 'balance,asc', page: 0 })
+            );
         });
     });
 
