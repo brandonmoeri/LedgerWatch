@@ -6,6 +6,7 @@ import type { AppDispatch, RootState } from '../store/store';
 import type { Transaction, TransactionStatus, TransactionType } from '../types/transaction';
 import DataTable from '../components/DataTable';
 import type { DataTableColumn, DataTableSort } from '../components/DataTable';
+import TransactionFilterForm from '../components/TransactionFilterForm';
 import { useStableCallback } from '../hooks/useStableCallback';
 
 const COLUMNS: DataTableColumn<Transaction>[] = [
@@ -91,56 +92,21 @@ export default function TransactionsPage() {
     <div>
       <h1>Transactions</h1>
 
-      <form onSubmit={handleSearchSubmit}>
-        <label>
-          Type
-          <select
-            value={typeFilter}
-            onChange={(e) => setTypeFilter(e.target.value as TransactionType | '')}
-          >
-            <option value="">All</option>
-            <option value="CREDIT">Credit</option>
-            <option value="DEBIT">Debit</option>
-          </select>
-        </label>
-        <label>
-          Status
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as TransactionStatus | '')}
-          >
-            <option value="">All</option>
-            <option value="PENDING">Pending</option>
-            <option value="POSTED">Posted</option>
-            <option value="VOIDED">Voided</option>
-          </select>
-        </label>
-        <label>
-          From
-          <input
-            type="date"
-            value={fromDate}
-            onChange={(e) => setFromDate(e.target.value)}
-          />
-        </label>
-        <label>
-          To
-          <input
-            type="date"
-            value={toDate}
-            onChange={(e) => setToDate(e.target.value)}
-          />
-        </label>
-        <label>
-          Sort
-          <select value={sort} onChange={(e) => handleSortChange(e.target.value)}>
-            {SORT_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>{opt.label}</option>
-            ))}
-          </select>
-        </label>
-        <button type="submit">Search</button>
-      </form>
+      <TransactionFilterForm
+        typeFilter={typeFilter}
+        onTypeFilterChange={setTypeFilter}
+        statusFilter={statusFilter}
+        onStatusFilterChange={setStatusFilter}
+        fromDate={fromDate}
+        onFromDateChange={setFromDate}
+        toDate={toDate}
+        onToDateChange={setToDate}
+        sort={sort}
+        onSortChange={handleSortChange}
+        sortOptions={SORT_OPTIONS}
+        onSubmit={handleSearchSubmit}
+        disabled={status === 'loading'}
+      />
 
       <DataTable
         caption="Transactions"
