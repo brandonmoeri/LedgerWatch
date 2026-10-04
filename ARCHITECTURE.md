@@ -90,6 +90,7 @@ Both services are stateless OAuth2 resource servers (`spring-boot-starter-oauth2
 |---|---|
 | `ADMIN` | All reads and writes |
 | `ANALYST` | Reads only (`GET`); writes return 403 |
+| `SERVICE` | Service-to-service `/internal/**` endpoints only. No dev user or token issuance for it exists yet |
 
 **Token issuance** lives in account-service. `POST /auth/login` checks credentials against an in-memory dev user store in `AuthService` (BCrypt-hashed) and returns `{ token, tokenType: "Bearer", expiresIn: 3600 }`. Tokens carry `sub`, `roles`, `iat` and `exp` (1 hour). Seeded dev users:
 
@@ -120,6 +121,7 @@ accounts.account
   balance     NUMERIC(19,4) NOT NULL DEFAULT 0
   created_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
   updated_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+  version     BIGINT       NOT NULL DEFAULT 0          -- JPA @Version (optimistic locking, V2)
 ```
 
 #### REST API
@@ -131,6 +133,7 @@ accounts.account
 | `GET` | `/accounts/{id}` | Any role | Fetch by UUID |
 | `POST` | `/accounts` | `ADMIN` | Create (`ownerName`, optional `initialBalance`) |
 | `PATCH` | `/accounts/{id}` | `ADMIN` | Update `ownerName` and/or `status` |
+| `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 409 if the account is `FROZEN`/`CLOSED` or was modified concurrently (optimistic lock); callers re-read and retry |
 
 #### Configuration
 

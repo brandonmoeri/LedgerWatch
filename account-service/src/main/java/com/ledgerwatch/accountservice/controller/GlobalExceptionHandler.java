@@ -1,6 +1,7 @@
 package com.ledgerwatch.accountservice.controller;
 
 import com.ledgerwatch.common.error.AbstractApiExceptionHandler;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.security.authentication.BadCredentialsException;
@@ -13,5 +14,11 @@ public class GlobalExceptionHandler extends AbstractApiExceptionHandler {
   @ExceptionHandler(BadCredentialsException.class)
   public ProblemDetail handleBadCredentials(BadCredentialsException ex) {
     return ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, ex.getMessage());
+  }
+
+  @ExceptionHandler(OptimisticLockingFailureException.class)
+  public ProblemDetail handleOptimisticLock(OptimisticLockingFailureException ex) {
+    return ProblemDetail.forStatusAndDetail(
+        HttpStatus.CONFLICT, "Account was modified concurrently; re-read and retry");
   }
 }
