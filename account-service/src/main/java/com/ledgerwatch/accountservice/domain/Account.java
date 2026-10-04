@@ -28,6 +28,10 @@ public class Account {
   @Column(name = "updated_at", nullable = false)
   private Instant updatedAt = Instant.now();
 
+  @Version
+  @Column(nullable = false)
+  private Long version;
+
   @PreUpdate
   void onUpdate() {
     this.updatedAt = Instant.now();
@@ -69,5 +73,9 @@ public class Account {
 
   public Instant getUpdatedAt() {
     return updatedAt;
+  }
+
+  public Long getVersion() {
+    return version;
   }
 }

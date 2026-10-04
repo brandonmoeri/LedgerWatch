@@ -61,4 +61,25 @@ public class AccountService {
     }
     return Objects.requireNonNull(repo.save(account), "Repository returned null for account");
   }
+
+  /**
+   * Adds {@code delta} to the account balance. Concurrent writers are detected by the
+   * {@code @Version} column; the loser gets an {@link
+   * org.springframework.orm.ObjectOptimisticLockingFailureException} and may retry.
+   */
+  @Transactional
+  public Account applyBalanceDelta(UUID id, BigDecimal delta) {
+    Objects.requireNonNull(delta, "Delta must not be null");
+    if (delta.signum() == 0) {
+      throw new IllegalArgumentException("Delta must be non-zero");
+    }
+    Account account = getById(id);
+    if (account.getStatus() != AccountStatus.ACTIVE) {
+      throw new IllegalStateException(
+          "Account is " + account.getStatus() + " and cannot accept balance changes: " + id);
+    }
+    account.setBalance(account.getBalance().add(delta));
+    // Flush now so a version conflict surfaces here rather than at commit.
+    return repo.saveAndFlush(account);
+  }
 }

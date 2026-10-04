@@ -26,6 +26,7 @@ import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 
 @SuppressWarnings("null")
 @ExtendWith(MockitoExtension.class)
@@ -164,5 +165,91 @@ public class AccountServiceTest {
         accountService.updateAccount(existingId, new UpdateAccountRequest("   ", null));
 
     assertThat(result.getOwnerName()).isEqualTo("Alice"); // untouched
+  }
+
+  // --- applyBalanceDelta ---
+
+  @Test
+  void applyBalanceDelta_addsPositiveDelta() {
+    existing.setBalance(new BigDecimal("100.00"));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+    Account result = accountService.applyBalanceDelta(existingId, new BigDecimal("25.5"));
+
+    assertThat(result.getBalance()).isEqualByComparingTo("125.50");
+    verify(accountRepository).saveAndFlush(existing);
+  }
+
+  @Test
+  void applyBalanceDelta_subtractsNegativeDelta() {
+    existing.setBalance(new BigDecimal("100.00"));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+    Account result = accountService.applyBalanceDelta(existingId, new BigDecimal("-40.25"));
+
+    assertThat(result.getBalance()).isEqualByComparingTo("59.75");
+  }
+
+  @Test
+  void applyBalanceDelta_rejectsZeroDelta() {
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, BigDecimal.ZERO))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("non-zero");
+
+    verifyNoInteractions(accountRepository);
+  }
+
+  @Test
+  void applyBalanceDelta_rejectsNullDelta() {
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, null))
+        .isInstanceOf(NullPointerException.class);
+
+    verifyNoInteractions(accountRepository);
+  }
+
+  @Test
+  void applyBalanceDelta_rejectsFrozenAccount() {
+    existing.setStatus(AccountStatus.FROZEN);
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, BigDecimal.TEN))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("FROZEN");
+
+    assertThat(existing.getBalance()).isEqualByComparingTo(BigDecimal.ZERO);
+    verify(accountRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void applyBalanceDelta_rejectsClosedAccount() {
+    existing.setStatus(AccountStatus.CLOSED);
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, BigDecimal.TEN))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("CLOSED");
+
+    verify(accountRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void applyBalanceDelta_throwsWhenAccountNotFound() {
+    UUID unknown = UUID.randomUUID();
+    when(accountRepository.findById(unknown)).thenReturn(Optional.empty());
+
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(unknown, BigDecimal.TEN))
+        .isInstanceOf(NoSuchElementException.class);
+  }
+
+  @Test
+  void applyBalanceDelta_propagatesOptimisticLockFailure() {
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any()))
+        .thenThrow(new ObjectOptimisticLockingFailureException(Account.class, existingId));
+
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, BigDecimal.TEN))
+        .isInstanceOf(ObjectOptimisticLockingFailureException.class);
   }
 }
