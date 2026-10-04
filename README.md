@@ -8,9 +8,9 @@ A banking microservice platform for tracking accounts and transactions, built as
 |---|---|
 | `account-service` (Spring Boot 3.3, Java 21) | **Functional** — full account CRUD REST API, JPA persistence, validation, unit + integration tests |
 | `transaction-service` (Spring Boot 3.3, Java 21) | **Functional** — full transaction CRUD REST API, JPA persistence, validation, unit + integration tests |
-| Postgres + both services (local, via Docker Compose) | Running — Postgres seeded with `accounts` and `transactions` schemas |
-| React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — accounts dashboard, detail, and create pages; Redux Toolkit store; Axios API client; Vitest component tests |
-| CI/CD | Not started |
+| Postgres + both services (local, via Docker Compose) | Running — `accounts` and `transactions` schemas owned by per-service Flyway migrations |
+| React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create, and transactions pages; Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
+| CI/CD | **CI functional** — GitHub Actions on PRs to `master`/`dev`: path-filtered per-service Spotless check + `mvn verify` (JaCoCo 70% coverage gate), frontend type check + lint + Vitest; Docker images published to GHCR on push to `dev`. Deployment (CD) not started |
 | AWS infra (`account-service`) | IaC ready (Terraform, `infra/aws/`) — deployed to ECS Fargate + RDS and CRUD-verified end-to-end; torn down after verification |
 
 ## Architecture
@@ -109,12 +109,15 @@ mvn -pl account-service test
 ## Roadmap
 
 - [x] Account CRUD + balance logic in `account-service`
-- [ ] Transaction posting + history in `transaction-service`
+- [x] Transaction posting + history in `transaction-service`
 - [ ] `transaction-service` validates accounts via REST call to `account-service`
-- [ ] React/TS/Redux frontend scaffold with Storybook
-- [ ] Jest unit tests + Cypress E2E against local stack
-- [ ] GitHub Actions: build, test, lint on PR
+- [x] React/TS/Redux frontend scaffold with Storybook
+- [x] Unit/component tests (Vitest + Testing Library + MSW)
+- [ ] Cypress E2E against local stack
+- [x] GitHub Actions: build, test, lint on PR
+- [x] GitHub Actions: publish service images to GHCR
 - [ ] Jenkins: image build + deploy to AWS
-- [ ] Migrate local Postgres → AWS RDS → Aurora
+- [x] Migrate local Postgres → AWS RDS (`account-service`, Terraform; verified then torn down)
+- [ ] Migrate AWS RDS → Aurora
 - [ ] Containerize services onto EKS
 - [ ] Extract event-driven workloads to Lambda
