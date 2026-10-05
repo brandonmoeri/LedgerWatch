@@ -83,6 +83,13 @@
             <artifactId>postgresql</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- Standalone (shaded) artifact so WireMock's Jetty doesn't clash with Boot's. -->
+        <dependency>
+            <groupId>org.wiremock</groupId>
+            <artifactId>wiremock-standalone</artifactId>
+            <version>${wiremock.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -136,5 +143,6 @@
         <flyway.url>jdbc:postgresql://localhost:5432/ledgerwatch</flyway.url>
         <flyway.user>ledger</flyway.user>
         <flyway.password>ledger</flyway.password>
+        <wiremock.version>3.9.2</wiremock.version>
     </properties>
 </project>

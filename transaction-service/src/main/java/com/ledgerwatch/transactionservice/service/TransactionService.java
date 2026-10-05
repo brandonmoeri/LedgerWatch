@@ -1,5 +1,6 @@
 package com.ledgerwatch.transactionservice.service;
 
+import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
@@ -33,9 +34,11 @@ import org.springframework.transaction.annotation.Transactional;
 @Transactional(readOnly = true)
 public class TransactionService {
   private final TransactionRepository repo;
+  private final AccountServiceClient accountServiceClient;
 
-  public TransactionService(TransactionRepository repo) {
+  public TransactionService(TransactionRepository repo, AccountServiceClient accountServiceClient) {
     this.repo = repo;
+    this.accountServiceClient = accountServiceClient;
   }
 
   public Transaction getById(UUID id) {
@@ -95,6 +98,11 @@ public class TransactionService {
     return new DashboardSummaryResponse(balanceOverTime, spendByType);
   }
 
+  /**
+   * Inserts the transaction, then applies it to the account balance in account-service. The insert
+   * is flushed first so local constraint failures surface before any remote side effect; if the
+   * balance adjustment is rejected or fails, the exception rolls the insert back.
+   */
   @Transactional
   public Transaction createTransaction(CreateTransactionRequest request) {
     Transaction tx = new Transaction();
@@ -102,7 +110,12 @@ public class TransactionService {
     tx.setType(request.type());
     tx.setAmount(request.amount());
     tx.setDescription(request.description());
-    return repo.save(tx);
+    Transaction saved = repo.saveAndFlush(tx);
+
+    BigDecimal delta =
+        saved.getType() == TransactionType.CREDIT ? saved.getAmount() : saved.getAmount().negate();
+    accountServiceClient.applyBalanceDelta(saved.getAccountId(), delta);
+    return saved;
   }
 
   @Transactional

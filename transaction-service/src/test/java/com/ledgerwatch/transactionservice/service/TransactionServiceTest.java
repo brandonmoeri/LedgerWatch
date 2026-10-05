@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
+import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
@@ -22,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentMatchers;
+import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -37,6 +39,7 @@ import org.springframework.data.jpa.domain.Specification;
 class TransactionServiceTest {
 
   @Mock TransactionRepository transactionRepository;
+  @Mock AccountServiceClient accountServiceClient;
   @InjectMocks TransactionService transactionService;
 
   private UUID existingId;
@@ -53,7 +56,7 @@ class TransactionServiceTest {
 
   @Test
   void create_persistsTransactionWithRequiredFields() {
-    when(transactionRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+    when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
     var request =
         new CreateTransactionRequest(
             UUID.randomUUID(), TransactionType.DEBIT, new BigDecimal("50.00"), null);
@@ -63,7 +66,48 @@ class TransactionServiceTest {
     assertThat(result.getType()).isEqualTo(TransactionType.DEBIT);
     assertThat(result.getAmount()).isEqualByComparingTo("50.00");
     assertThat(result.getStatus()).isEqualTo(TransactionStatus.POSTED);
-    verify(transactionRepository).save(any());
+    verify(transactionRepository).saveAndFlush(any());
+  }
+
+  @Test
+  void create_debit_appliesNegativeDeltaAfterInsert() {
+    when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+    UUID accountId = UUID.randomUUID();
+
+    transactionService.createTransaction(
+        new CreateTransactionRequest(
+            accountId, TransactionType.DEBIT, new BigDecimal("50.00"), null));
+
+    InOrder inOrder = inOrder(transactionRepository, accountServiceClient);
+    inOrder.verify(transactionRepository).saveAndFlush(any());
+    inOrder.verify(accountServiceClient).applyBalanceDelta(accountId, new BigDecimal("-50.00"));
+  }
+
+  @Test
+  void create_credit_appliesPositiveDelta() {
+    when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+    UUID accountId = UUID.randomUUID();
+
+    transactionService.createTransaction(
+        new CreateTransactionRequest(
+            accountId, TransactionType.CREDIT, new BigDecimal("75.25"), null));
+
+    verify(accountServiceClient).applyBalanceDelta(accountId, new BigDecimal("75.25"));
+  }
+
+  @Test
+  void create_accountServiceRejects_propagatesException() {
+    when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+    doThrow(new IllegalStateException("frozen"))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any());
+
+    assertThatThrownBy(
+            () ->
+                transactionService.createTransaction(
+                    new CreateTransactionRequest(
+                        UUID.randomUUID(), TransactionType.DEBIT, BigDecimal.TEN, null)))
+        .isInstanceOf(IllegalStateException.class);
   }
 
   @Test

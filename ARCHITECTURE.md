@@ -90,7 +90,7 @@ Both services are stateless OAuth2 resource servers (`spring-boot-starter-oauth2
 |---|---|
 | `ADMIN` | All reads and writes |
 | `ANALYST` | Reads only (`GET`); writes return 403 |
-| `SERVICE` | Service-to-service `/internal/**` endpoints only. No dev user or token issuance for it exists yet |
+| `SERVICE` | Service-to-service `/internal/**` endpoints only. There is no dev user for it; transaction-service mints its own `SERVICE` tokens (see [Calls to account-service](#calls-to-account-service)) |
 
 **Token issuance** lives in account-service. `POST /auth/login` checks credentials against an in-memory dev user store in `AuthService` (BCrypt-hashed) and returns `{ token, tokenType: "Bearer", expiresIn: 3600 }`. Tokens carry `sub`, `roles`, `iat` and `exp` (1 hour). Seeded dev users:
 
@@ -151,7 +151,17 @@ accounts.account
 **Postgres schema:** `transactions`  
 **Migrations:** Flyway (`db/migration`, schema `transactions`); Hibernate `ddl-auto: validate`
 
-Key dependencies: same as account-service. It validates JWTs but does not issue them (no `/auth` endpoint). No service-to-service HTTP calls are implemented yet.
+Key dependencies: same as account-service. It validates JWTs but does not issue them to users (no `/auth` endpoint). Tests add WireMock (`wiremock-standalone`).
+
+#### Calls to account-service
+
+`POST /transactions` applies the transaction to the account balance through account-service's `POST /internal/accounts/{id}/balance-adjustments` (CREDIT → `+amount`, DEBIT → `-amount`).
+
+- **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
+- **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
+- **Ordering:** in one local DB transaction, the row is inserted and flushed, then account-service is called. Any failure from that call rolls back the insert.
+- **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account or optimistic-lock conflict) → `409`, with no automatic retry; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
+- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
 
 #### Data model
 
@@ -174,7 +184,7 @@ transactions.transaction
 | `GET` | `/transactions` | Any role | List transactions |
 | `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
-| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount`, optional `description`) |
+| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount` ≤4 dp, optional `description`) and adjust the account balance; 404/409 from account-service pass through, 502 if it is unavailable |
 | `PATCH` | `/transactions/{id}` | `ADMIN` | Update `status` and/or `description` |
 
 ---
@@ -205,7 +215,7 @@ Each service owns its schema through Flyway. On startup, Spring Boot's Flyway au
 |---|---|---|---|
 | `postgres` | `postgres:16-alpine` | `5432` | Named volume `postgres_data`; `init.sql` mounted into `docker-entrypoint-initdb.d`; `pg_isready` healthcheck |
 | `account-service` | `account-service/Dockerfile` | `8081` | Waits for `postgres` to be healthy; `DB_URL` points at `postgres:5432` |
-| `transaction-service` | `transaction-service/Dockerfile` | `8082` | Same as above |
+| `transaction-service` | `transaction-service/Dockerfile` | `8082` | Same as above; `ACCOUNT_SERVICE_URL` points at `account-service:8081` |
 
 Both services read `JWT_SECRET` from the host environment or `.env` (copy `.env.example`). Flyway migrates each schema when its service starts. The SPA is not containerized; run it with Vite (see below).
 
