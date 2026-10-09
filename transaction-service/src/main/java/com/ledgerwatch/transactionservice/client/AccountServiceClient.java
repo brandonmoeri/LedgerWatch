@@ -1,5 +1,6 @@
 package com.ledgerwatch.transactionservice.client;
 
+import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
 import java.net.http.HttpClient;
 import java.util.NoSuchElementException;
@@ -50,6 +51,7 @@ public class AccountServiceClient {
    *
    * @throws NoSuchElementException the account does not exist
    * @throws IllegalStateException the account is FROZEN/CLOSED or was modified concurrently
+   * @throws InsufficientFundsException a debit would take the balance below zero
    * @throws AccountServiceException account-service is unreachable, timed out, or failed
    */
   public void applyBalanceDelta(UUID accountId, BigDecimal delta) {
@@ -73,6 +75,12 @@ public class AccountServiceClient {
                         + accountId
                         + " rejected the balance change (frozen, closed, or modified"
                         + " concurrently)");
+              })
+          .onStatus(
+              // The internal endpoint returns 422 only for insufficient funds.
+              status -> status.isSameCodeAs(HttpStatus.UNPROCESSABLE_ENTITY),
+              (request, response) -> {
+                throw new InsufficientFundsException(accountId, delta.negate());
               })
           .onStatus(
               HttpStatusCode::isError,

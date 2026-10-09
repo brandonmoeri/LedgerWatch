@@ -9,6 +9,7 @@ import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
+import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -190,6 +191,45 @@ public class AccountServiceTest {
     Account result = accountService.applyBalanceDelta(existingId, new BigDecimal("-40.25"));
 
     assertThat(result.getBalance()).isEqualByComparingTo("59.75");
+  }
+
+  @Test
+  void applyBalanceDelta_allowsDebitDownToExactlyZero() {
+    existing.setBalance(new BigDecimal("40.25"));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+    Account result = accountService.applyBalanceDelta(existingId, new BigDecimal("-40.25"));
+
+    assertThat(result.getBalance()).isEqualByComparingTo(BigDecimal.ZERO);
+  }
+
+  @Test
+  void applyBalanceDelta_rejectsDebitExceedingBalance() {
+    existing.setBalance(new BigDecimal("40.25"));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, new BigDecimal("-40.26")))
+        .isInstanceOfSatisfying(
+            InsufficientFundsException.class,
+            ex -> {
+              assertThat(ex.getAccountId()).isEqualTo(existingId);
+              assertThat(ex.getAmount()).isEqualByComparingTo("40.26");
+            });
+
+    assertThat(existing.getBalance()).isEqualByComparingTo("40.25");
+    verify(accountRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void applyBalanceDelta_allowsCreditOnNegativeBalance() {
+    existing.setBalance(new BigDecimal("-10.00"));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+    Account result = accountService.applyBalanceDelta(existingId, new BigDecimal("5.00"));
+
+    assertThat(result.getBalance()).isEqualByComparingTo("-5.00");
   }
 
   @Test

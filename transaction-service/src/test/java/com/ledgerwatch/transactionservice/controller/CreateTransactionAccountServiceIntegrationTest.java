@@ -155,6 +155,22 @@ class CreateTransactionAccountServiceIntegrationTest {
   }
 
   @Test
+  void insufficientFunds_returns422Problem_andRollsBackInsert() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubAdjustment(accountId, 422);
+
+    createTransaction(accountId, TransactionType.DEBIT, "40.50")
+        .andExpect(status().isUnprocessableEntity())
+        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+        .andExpect(jsonPath("$.type").value("urn:ledgerwatch:problem:insufficient-funds"))
+        .andExpect(jsonPath("$.title").value("Insufficient funds"))
+        .andExpect(jsonPath("$.accountId").value(accountId.toString()))
+        .andExpect(jsonPath("$.amount").value(40.50));
+
+    assertThat(transactionRepository.count()).isZero();
+  }
+
+  @Test
   void accountServiceError_returns502_andRollsBackInsert() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 500);

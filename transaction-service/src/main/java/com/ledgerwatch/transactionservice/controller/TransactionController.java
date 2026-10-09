@@ -111,7 +111,9 @@ public class TransactionController {
         content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "422",
-        description = "Idempotency-Key was already used with a different request",
+        description =
+            "Idempotency-Key was already used with a different request, or a DEBIT exceeds the"
+                + " account balance (type urn:ledgerwatch:problem:insufficient-funds)",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
   })
   public ResponseEntity<TransactionResponse> createTransaction(

@@ -63,12 +63,13 @@ The parent manages the Spring Boot and Testcontainers BOMs, the springdoc versio
 
 ### common
 
-A plain jar (no Spring Boot plugin) that both services depend on. It currently holds `AbstractApiExceptionHandler`, the shared RFC 7807 `ProblemDetail` error contract:
+A plain jar (no Spring Boot plugin) that both services depend on. It holds `AbstractApiExceptionHandler`, the shared RFC 7807 `ProblemDetail` error contract (served as `application/problem+json`), and `InsufficientFundsException`, which both services throw:
 
 | Exception | Status |
 |---|---|
 | `NoSuchElementException` | 404 |
 | `IllegalStateException` | 409 |
+| `InsufficientFundsException` | 422, `type: urn:ledgerwatch:problem:insufficient-funds`, `title: Insufficient funds`, with `accountId` and `amount` (the rejected debit) properties |
 | `IllegalArgumentException` | 400 |
 | `MethodArgumentNotValidException` | 400, with an `errors` map of field → message |
 
@@ -133,7 +134,7 @@ accounts.account
 | `GET` | `/accounts/{id}` | Any role | Fetch by UUID |
 | `POST` | `/accounts` | `ADMIN` | Create (`ownerName`, optional `initialBalance`) |
 | `PATCH` | `/accounts/{id}` | `ADMIN` | Update `ownerName` and/or `status` |
-| `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 409 if the account is `FROZEN`/`CLOSED` or was modified concurrently (optimistic lock); callers re-read and retry |
+| `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 422 (insufficient funds) if a negative delta would take the balance below zero; a debit down to exactly 0 is allowed, and credits are never blocked. 409 if the account is `FROZEN`/`CLOSED` or was modified concurrently (optimistic lock); callers re-read and retry |
 
 #### Configuration
 
@@ -160,7 +161,7 @@ Key dependencies: same as account-service. It validates JWTs but does not issue 
 - **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
 - **Ordering:** in one local DB transaction, the row is inserted and flushed, then account-service is called. Any failure from that call rolls back the insert.
-- **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account or optimistic-lock conflict) → `409`, with no automatic retry; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
+- **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account or optimistic-lock conflict) → `409`, with no automatic retry; `422` → `InsufficientFundsException` → `422` with the same insufficient-funds problem type; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
 - **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
 
 #### Idempotent creates
@@ -205,7 +206,7 @@ transactions.idempotency_record                       -- V2
 | `GET` | `/transactions` | Any role | List transactions |
 | `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
-| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount` ≤4 dp, optional `description`) and adjust the account balance; 404/409 from account-service pass through, 502 if it is unavailable. Optional `Idempotency-Key` header: replays the original 201, 422 if reused with a different body |
+| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount` ≤4 dp, optional `description`) and adjust the account balance; 404/409 from account-service pass through; a DEBIT larger than the balance is 422 (`type: urn:ledgerwatch:problem:insufficient-funds`); 502 if account-service is unavailable. Optional `Idempotency-Key` header: replays the original 201, 422 (default `about:blank` type) if reused with a different body |
 | `PATCH` | `/transactions/{id}` | `ADMIN` | Update `status` and/or `description` |
 
 ---

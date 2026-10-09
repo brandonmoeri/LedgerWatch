@@ -26,6 +26,17 @@ public abstract class AbstractApiExceptionHandler {
     return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
   }
 
+  @ExceptionHandler(InsufficientFundsException.class)
+  public ProblemDetail handleInsufficientFunds(InsufficientFundsException ex) {
+    ProblemDetail problemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, ex.getMessage());
+    problemDetail.setType(InsufficientFundsException.TYPE);
+    problemDetail.setTitle("Insufficient funds");
+    problemDetail.setProperty("accountId", ex.getAccountId());
+    problemDetail.setProperty("amount", ex.getAmount());
+    return problemDetail;
+  }
+
   @ExceptionHandler(IllegalArgumentException.class)
   public ProblemDetail handleBadRequest(IllegalArgumentException ex) {
     return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());

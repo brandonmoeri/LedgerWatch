@@ -85,6 +85,31 @@ public class InternalAccountControllerIntegrationTest {
   }
 
   @Test
+  void debitExceedingBalance_returns422ProblemAndBalanceUnchanged() throws Exception {
+    var id = seed("100.00", AccountStatus.ACTIVE);
+
+    adjust(id, "{\"delta\": -100.01}", SERVICE)
+        .andExpect(status().isUnprocessableEntity())
+        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
+        .andExpect(jsonPath("$.type").value("urn:ledgerwatch:problem:insufficient-funds"))
+        .andExpect(jsonPath("$.title").value("Insufficient funds"))
+        .andExpect(jsonPath("$.status").value(422))
+        .andExpect(jsonPath("$.accountId").value(id.toString()))
+        .andExpect(jsonPath("$.amount").value(100.01));
+
+    assertThat(balanceOf(id)).isEqualByComparingTo("100.00");
+  }
+
+  @Test
+  void debitOfEntireBalance_returns200() throws Exception {
+    var id = seed("100.00", AccountStatus.ACTIVE);
+
+    adjust(id, "{\"delta\": -100}", SERVICE).andExpect(status().isOk());
+
+    assertThat(balanceOf(id)).isEqualByComparingTo("0");
+  }
+
+  @Test
   void successiveDeltas_incrementVersion() throws Exception {
     var id = seed("0", AccountStatus.ACTIVE);
     long before = accountRepository.findById(id).orElseThrow().getVersion();
