@@ -161,7 +161,18 @@ Key dependencies: same as account-service. It validates JWTs but does not issue 
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
 - **Ordering:** in one local DB transaction, the row is inserted and flushed, then account-service is called. Any failure from that call rolls back the insert.
 - **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account or optimistic-lock conflict) → `409`, with no automatic retry; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
-- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
+- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
+
+#### Idempotent creates
+
+`POST /transactions` accepts an optional `Idempotency-Key` header (1–255 characters; clients typically send a UUID per logical request).
+
+- **Scope:** keys are per caller (the JWT `sub`), enforced by `UNIQUE (caller, idempotency_key)` on `idempotency_record`.
+- **Claim first:** the request inserts its key row with `INSERT … ON CONFLICT DO NOTHING` before inserting the transaction or calling account-service, all in one DB transaction. A concurrent duplicate waits on the unique index. If the first request commits, the duplicate replays its response. If it rolls back, the duplicate goes ahead as a new request.
+- **Replay:** a repeat with the same key and the same request (a SHA-256 over `accountId`, `type`, the normalized `amount` and `description`) returns the original 201 body, as stored, with an `Idempotent-Replayed: true` header. Later `PATCH`es don't change that body. No new row is inserted and the balance is not adjusted again.
+- **Mismatch:** the same key with a different request returns `422`.
+- **Failures aren't recorded:** any error rolls back the claim, so the client can retry with the same key. Keys never expire yet.
+- Without the header, every request creates a new transaction, as before.
 
 #### Data model
 
@@ -175,6 +186,16 @@ transactions.transaction
   description VARCHAR(255)
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+
+transactions.idempotency_record                       -- V2
+  id              UUID PK  DEFAULT gen_random_uuid()
+  caller          VARCHAR(255) NOT NULL                -- JWT sub
+  idempotency_key VARCHAR(255) NOT NULL
+  request_hash    VARCHAR(64)  NOT NULL                -- SHA-256 hex of the request
+  transaction_id  UUID FK → transaction(id) ON DELETE CASCADE
+  response_body   TEXT                                 -- original 201 body (JSON)
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  UNIQUE (caller, idempotency_key)
 ```
 
 #### REST API
@@ -184,7 +205,7 @@ transactions.transaction
 | `GET` | `/transactions` | Any role | List transactions |
 | `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
-| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount` ≤4 dp, optional `description`) and adjust the account balance; 404/409 from account-service pass through, 502 if it is unavailable |
+| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount` ≤4 dp, optional `description`) and adjust the account balance; 404/409 from account-service pass through, 502 if it is unavailable. Optional `Idempotency-Key` header: replays the original 201, 422 if reused with a different body |
 | `PATCH` | `/transactions/{id}` | `ADMIN` | Update `status` and/or `description` |
 
 ---
@@ -201,7 +222,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.

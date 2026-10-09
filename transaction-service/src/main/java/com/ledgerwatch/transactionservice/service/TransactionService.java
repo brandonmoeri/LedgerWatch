@@ -1,23 +1,33 @@
 package com.ledgerwatch.transactionservice.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
+import com.ledgerwatch.transactionservice.dto.CreateTransactionResult;
 import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse;
 import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse.BalancePoint;
 import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse.TypeSpending;
+import com.ledgerwatch.transactionservice.dto.TransactionResponse;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
+import com.ledgerwatch.transactionservice.repository.IdempotencyRecordRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionSpecifications;
+import java.io.UncheckedIOException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
@@ -33,12 +43,22 @@ import org.springframework.transaction.annotation.Transactional;
 @Service
 @Transactional(readOnly = true)
 public class TransactionService {
-  private final TransactionRepository repo;
-  private final AccountServiceClient accountServiceClient;
+  static final int MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
-  public TransactionService(TransactionRepository repo, AccountServiceClient accountServiceClient) {
+  private final TransactionRepository repo;
+  private final IdempotencyRecordRepository idempotencyRepo;
+  private final AccountServiceClient accountServiceClient;
+  private final ObjectMapper objectMapper;
+
+  public TransactionService(
+      TransactionRepository repo,
+      IdempotencyRecordRepository idempotencyRepo,
+      AccountServiceClient accountServiceClient,
+      ObjectMapper objectMapper) {
     this.repo = repo;
+    this.idempotencyRepo = idempotencyRepo;
     this.accountServiceClient = accountServiceClient;
+    this.objectMapper = objectMapper;
   }
 
   public Transaction getById(UUID id) {
@@ -105,17 +125,103 @@ public class TransactionService {
    */
   @Transactional
   public Transaction createTransaction(CreateTransactionRequest request) {
+    Transaction saved = insert(request);
+    applyToBalance(saved);
+    return saved;
+  }
+
+  /**
+   * Creates the transaction at most once per {@code (caller, idempotencyKey)}, the same way as
+   * {@link #createTransaction(CreateTransactionRequest)}. If the key was already used for the same
+   * request, this returns the stored original response. The key is claimed before anything else, so
+   * a concurrent duplicate waits on the unique constraint and then replays. Only successes are
+   * stored: a failure rolls the claim back with the insert, so the client can retry with the key. A
+   * null key creates the transaction without idempotency.
+   */
+  @Transactional
+  public CreateTransactionResult createTransaction(
+      CreateTransactionRequest request, String caller, String idempotencyKey) {
+    if (idempotencyKey == null) {
+      return new CreateTransactionResult(
+          TransactionResponse.from(createTransaction(request)), false);
+    }
+    if (idempotencyKey.isBlank() || idempotencyKey.length() > MAX_IDEMPOTENCY_KEY_LENGTH) {
+      throw new IllegalArgumentException(
+          "Idempotency-Key must be 1-" + MAX_IDEMPOTENCY_KEY_LENGTH + " non-blank characters");
+    }
+    Objects.requireNonNull(caller, "caller must not be null");
+
+    String requestHash = requestHash(request);
+    if (idempotencyRepo.claim(caller, idempotencyKey, requestHash) == 0) {
+      return replay(caller, idempotencyKey, requestHash);
+    }
+
+    Transaction saved = insert(request);
+    TransactionResponse response = TransactionResponse.from(saved);
+    idempotencyRepo.complete(caller, idempotencyKey, saved.getId(), toJson(response));
+    applyToBalance(saved);
+    return new CreateTransactionResult(response, false);
+  }
+
+  private CreateTransactionResult replay(String caller, String idempotencyKey, String requestHash) {
+    var stored =
+        idempotencyRepo
+            .findByCallerAndIdempotencyKey(caller, idempotencyKey)
+            .orElseThrow(() -> new IllegalStateException("Idempotency record vanished"));
+    if (!stored.getRequestHash().equals(requestHash)) {
+      throw new IdempotencyKeyReusedException(idempotencyKey);
+    }
+    try {
+      return new CreateTransactionResult(
+          objectMapper.readValue(stored.getResponseBody(), TransactionResponse.class), true);
+    } catch (JsonProcessingException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
+  /**
+   * SHA-256 over the request's fields, with the amount normalized so 10.5 and 10.50 match. The
+   * description goes last with a marker so a null description and an empty one hash differently.
+   */
+  private static String requestHash(CreateTransactionRequest request) {
+    String canonical =
+        String.join(
+            "|",
+            String.valueOf(request.accountId()),
+            String.valueOf(request.type()),
+            request.amount().stripTrailingZeros().toPlainString(),
+            request.description() == null ? "" : "=" + request.description());
+    try {
+      return HexFormat.of()
+          .formatHex(
+              MessageDigest.getInstance("SHA-256")
+                  .digest(canonical.getBytes(StandardCharsets.UTF_8)));
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException("SHA-256 unavailable", e);
+    }
+  }
+
+  private String toJson(TransactionResponse response) {
+    try {
+      return objectMapper.writeValueAsString(response);
+    } catch (JsonProcessingException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
+  private Transaction insert(CreateTransactionRequest request) {
     Transaction tx = new Transaction();
     tx.setAccountId(request.accountId());
     tx.setType(request.type());
     tx.setAmount(request.amount());
     tx.setDescription(request.description());
-    Transaction saved = repo.saveAndFlush(tx);
+    return repo.saveAndFlush(tx);
+  }
 
+  private void applyToBalance(Transaction saved) {
     BigDecimal delta =
         saved.getType() == TransactionType.CREDIT ? saved.getAmount() : saved.getAmount().negate();
     accountServiceClient.applyBalanceDelta(saved.getAccountId(), delta);
-    return saved;
   }
 
   @Transactional

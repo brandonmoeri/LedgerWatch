@@ -72,7 +72,7 @@ Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 |---|---|---|
 | `GET` | `/transactions` | List all transactions |
 | `GET` | `/transactions/{id}` | Fetch transaction by UUID |
-| `POST` | `/transactions` | Post transaction (`accountId`, `type`, `amount`, optional `description`) |
+| `POST` | `/transactions` | Post transaction (`accountId`, `type`, `amount`, optional `description`); send an `Idempotency-Key` header to make retries safe |
 | `PATCH` | `/transactions/{id}` | Update `status` and/or `description` |
 
 Transaction types: `CREDIT`, `DEBIT`. Statuses: `POSTED`, `VOIDED`.
