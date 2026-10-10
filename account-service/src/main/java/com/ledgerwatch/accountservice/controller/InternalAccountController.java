@@ -38,7 +38,8 @@ public class InternalAccountController {
   @Operation(
       summary = "Apply a balance delta",
       description =
-          "Adds a signed delta to the account balance. Only ACTIVE accounts accept changes."
+          "Adds a signed delta to the account balance. Only ACTIVE accounts accept changes,"
+              + " and a debit may not take the balance below zero."
               + " Concurrent modification is detected with optimistic locking and returns 409;"
               + " callers may re-read and retry.")
   @ApiResponses({
@@ -58,6 +59,12 @@ public class InternalAccountController {
     @ApiResponse(
         responseCode = "409",
         description = "Account is FROZEN/CLOSED, or was modified concurrently",
+        content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+    @ApiResponse(
+        responseCode = "422",
+        description =
+            "Insufficient funds: a negative delta would take the balance below zero"
+                + " (type urn:ledgerwatch:problem:insufficient-funds)",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
   })
   public AccountResponse applyBalanceDelta(

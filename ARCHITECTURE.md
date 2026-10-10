@@ -63,12 +63,13 @@ The parent manages the Spring Boot and Testcontainers BOMs, the springdoc versio
 
 ### common
 
-A plain jar (no Spring Boot plugin) that both services depend on. It currently holds `AbstractApiExceptionHandler`, the shared RFC 7807 `ProblemDetail` error contract:
+A plain jar (no Spring Boot plugin) that both services depend on. It holds `AbstractApiExceptionHandler`, the shared RFC 7807 `ProblemDetail` error contract (served as `application/problem+json`), and `InsufficientFundsException`, which both services throw:
 
 | Exception | Status |
 |---|---|
 | `NoSuchElementException` | 404 |
 | `IllegalStateException` | 409 |
+| `InsufficientFundsException` | 422, `type: urn:ledgerwatch:problem:insufficient-funds`, `title: Insufficient funds`, with `accountId` and `amount` (the rejected debit) properties |
 | `IllegalArgumentException` | 400 |
 | `MethodArgumentNotValidException` | 400, with an `errors` map of field → message |
 
@@ -90,7 +91,7 @@ Both services are stateless OAuth2 resource servers (`spring-boot-starter-oauth2
 |---|---|
 | `ADMIN` | All reads and writes |
 | `ANALYST` | Reads only (`GET`); writes return 403 |
-| `SERVICE` | Service-to-service `/internal/**` endpoints only. No dev user or token issuance for it exists yet |
+| `SERVICE` | Service-to-service `/internal/**` endpoints only. There is no dev user for it; transaction-service mints its own `SERVICE` tokens (see [Calls to account-service](#calls-to-account-service)) |
 
 **Token issuance** lives in account-service. `POST /auth/login` checks credentials against an in-memory dev user store in `AuthService` (BCrypt-hashed) and returns `{ token, tokenType: "Bearer", expiresIn: 3600 }`. Tokens carry `sub`, `roles`, `iat` and `exp` (1 hour). Seeded dev users:
 
@@ -133,7 +134,7 @@ accounts.account
 | `GET` | `/accounts/{id}` | Any role | Fetch by UUID |
 | `POST` | `/accounts` | `ADMIN` | Create (`ownerName`, optional `initialBalance`) |
 | `PATCH` | `/accounts/{id}` | `ADMIN` | Update `ownerName` and/or `status` |
-| `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 409 if the account is `FROZEN`/`CLOSED` or was modified concurrently (optimistic lock); callers re-read and retry |
+| `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 422 (insufficient funds) if a negative delta would take the balance below zero; a debit down to exactly 0 is allowed, and credits are never blocked. 409 if the account is `FROZEN`/`CLOSED` or was modified concurrently (optimistic lock); callers re-read and retry |
 
 #### Configuration
 
@@ -151,7 +152,28 @@ accounts.account
 **Postgres schema:** `transactions`  
 **Migrations:** Flyway (`db/migration`, schema `transactions`); Hibernate `ddl-auto: validate`
 
-Key dependencies: same as account-service. It validates JWTs but does not issue them (no `/auth` endpoint). No service-to-service HTTP calls are implemented yet.
+Key dependencies: same as account-service. It validates JWTs but does not issue them to users (no `/auth` endpoint). Tests add WireMock (`wiremock-standalone`).
+
+#### Calls to account-service
+
+`POST /transactions` applies the transaction to the account balance through account-service's `POST /internal/accounts/{id}/balance-adjustments` (CREDIT → `+amount`, DEBIT → `-amount`).
+
+- **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
+- **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
+- **Ordering:** in one local DB transaction, the row is inserted and flushed, then account-service is called. Any failure from that call rolls back the insert.
+- **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account or optimistic-lock conflict) → `409`, with no automatic retry; `422` → `InsufficientFundsException` → `422` with the same insufficient-funds problem type; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
+- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
+
+#### Idempotent creates
+
+`POST /transactions` accepts an optional `Idempotency-Key` header (1–255 characters; clients typically send a UUID per logical request).
+
+- **Scope:** keys are per caller (the JWT `sub`), enforced by `UNIQUE (caller, idempotency_key)` on `idempotency_record`.
+- **Claim first:** the request inserts its key row with `INSERT … ON CONFLICT DO NOTHING` before inserting the transaction or calling account-service, all in one DB transaction. A concurrent duplicate waits on the unique index. If the first request commits, the duplicate replays its response. If it rolls back, the duplicate goes ahead as a new request.
+- **Replay:** a repeat with the same key and the same request (a SHA-256 over `accountId`, `type`, the normalized `amount` and `description`) returns the original 201 body, as stored, with an `Idempotent-Replayed: true` header. Later `PATCH`es don't change that body. No new row is inserted and the balance is not adjusted again.
+- **Mismatch:** the same key with a different request returns `422`.
+- **Failures aren't recorded:** any error rolls back the claim, so the client can retry with the same key. Keys never expire yet.
+- Without the header, every request creates a new transaction, as before.
 
 #### Data model
 
@@ -165,6 +187,16 @@ transactions.transaction
   description VARCHAR(255)
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+
+transactions.idempotency_record                       -- V2
+  id              UUID PK  DEFAULT gen_random_uuid()
+  caller          VARCHAR(255) NOT NULL                -- JWT sub
+  idempotency_key VARCHAR(255) NOT NULL
+  request_hash    VARCHAR(64)  NOT NULL                -- SHA-256 hex of the request
+  transaction_id  UUID FK → transaction(id) ON DELETE CASCADE
+  response_body   TEXT                                 -- original 201 body (JSON)
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  UNIQUE (caller, idempotency_key)
 ```
 
 #### REST API
@@ -174,7 +206,7 @@ transactions.transaction
 | `GET` | `/transactions` | Any role | List transactions |
 | `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
-| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount`, optional `description`) |
+| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount` ≤4 dp, optional `description`) and adjust the account balance; 404/409 from account-service pass through; a DEBIT larger than the balance is 422 (`type: urn:ledgerwatch:problem:insufficient-funds`); 502 if account-service is unavailable. Optional `Idempotency-Key` header: replays the original 201, 422 (default `about:blank` type) if reused with a different body |
 | `PATCH` | `/transactions/{id}` | `ADMIN` | Update `status` and/or `description` |
 
 ---
@@ -191,7 +223,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.
@@ -205,7 +237,7 @@ Each service owns its schema through Flyway. On startup, Spring Boot's Flyway au
 |---|---|---|---|
 | `postgres` | `postgres:16-alpine` | `5432` | Named volume `postgres_data`; `init.sql` mounted into `docker-entrypoint-initdb.d`; `pg_isready` healthcheck |
 | `account-service` | `account-service/Dockerfile` | `8081` | Waits for `postgres` to be healthy; `DB_URL` points at `postgres:5432` |
-| `transaction-service` | `transaction-service/Dockerfile` | `8082` | Same as above |
+| `transaction-service` | `transaction-service/Dockerfile` | `8082` | Same as above; `ACCOUNT_SERVICE_URL` points at `account-service:8081` |
 
 Both services read `JWT_SECRET` from the host environment or `.env` (copy `.env.example`). Flyway migrates each schema when its service starts. The SPA is not containerized; run it with Vite (see below).
 

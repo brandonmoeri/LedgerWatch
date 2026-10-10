@@ -6,6 +6,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
+import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -34,6 +36,9 @@ class TransactionControllerIntegrationTest {
   @Autowired MockMvc mockMvc;
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
+
+  // Balance propagation is covered by CreateTransactionAccountServiceIntegrationTest.
+  @MockBean AccountServiceClient accountServiceClient;
 
   @AfterEach
   void cleanUp() {

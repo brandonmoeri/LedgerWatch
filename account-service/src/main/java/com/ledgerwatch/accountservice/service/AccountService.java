@@ -6,6 +6,7 @@ import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
 import com.ledgerwatch.accountservice.repository.AccountSpecifications;
+import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
 import java.util.NoSuchElementException;
 import java.util.Objects;
@@ -63,8 +64,9 @@ public class AccountService {
   }
 
   /**
-   * Adds {@code delta} to the account balance. Concurrent writers are detected by the
-   * {@code @Version} column; the loser gets an {@link
+   * Adds {@code delta} to the account balance. A negative delta (a debit) that would take the
+   * balance below zero throws {@link InsufficientFundsException}. Concurrent writers are detected
+   * by the {@code @Version} column; the loser gets an {@link
    * org.springframework.orm.ObjectOptimisticLockingFailureException} and may retry.
    */
   @Transactional
@@ -78,7 +80,14 @@ public class AccountService {
       throw new IllegalStateException(
           "Account is " + account.getStatus() + " and cannot accept balance changes: " + id);
     }
-    account.setBalance(account.getBalance().add(delta));
+    BigDecimal newBalance = account.getBalance().add(delta);
+    // Only debits are checked, so a credit is accepted even if the balance is already negative.
+    // The check reads a versioned row: if another writer changes the balance first, the flush
+    // below fails with an optimistic-lock conflict.
+    if (delta.signum() < 0 && newBalance.signum() < 0) {
+      throw new InsufficientFundsException(id, delta.negate());
+    }
+    account.setBalance(newBalance);
     // Flush now so a version conflict surfaces here rather than at commit.
     return repo.saveAndFlush(account);
   }

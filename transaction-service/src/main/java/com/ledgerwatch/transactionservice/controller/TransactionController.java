@@ -3,11 +3,13 @@ package com.ledgerwatch.transactionservice.controller;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
+import com.ledgerwatch.transactionservice.dto.CreateTransactionResult;
 import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse;
 import com.ledgerwatch.transactionservice.dto.TransactionResponse;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
 import com.ledgerwatch.transactionservice.service.TransactionService;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
@@ -22,12 +24,17 @@ import org.springframework.data.web.PageableDefault;
 import org.springframework.data.web.PagedModel;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/transactions")
 public class TransactionController {
+
+  static final String IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+  static final String IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed";
 
   private final TransactionService transactionService;
 
@@ -85,19 +92,43 @@ public class TransactionController {
   }
 
   @PostMapping
-  @ResponseStatus(HttpStatus.CREATED)
   @PreAuthorize("hasRole('ADMIN')")
-  @Operation(summary = "Create a transaction")
+  @Operation(
+      summary = "Create a transaction",
+      description =
+          "Send an Idempotency-Key header to make retries safe. A repeat of the same request "
+              + "with the same key returns the original 201 response, with an "
+              + "Idempotent-Replayed: true header, and does not create a second transaction or "
+              + "adjust the balance again. Keys are scoped to the caller and are only recorded "
+              + "when the request succeeds.")
   @ApiResponses({
-    @ApiResponse(responseCode = "201", description = "Transaction created"),
+    @ApiResponse(
+        responseCode = "201",
+        description = "Transaction created, or the original response replayed"),
     @ApiResponse(
         responseCode = "400",
         description = "Validation failed",
+        content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
+    @ApiResponse(
+        responseCode = "422",
+        description =
+            "Idempotency-Key was already used with a different request, or a DEBIT exceeds the"
+                + " account balance (type urn:ledgerwatch:problem:insufficient-funds)",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
   })
-  public TransactionResponse createTransaction(
-      @Valid @RequestBody CreateTransactionRequest request) {
-    return TransactionResponse.from(transactionService.createTransaction(request));
+  public ResponseEntity<TransactionResponse> createTransaction(
+      @Valid @RequestBody CreateTransactionRequest request,
+      @Parameter(description = "Client-generated key (e.g. a UUID), at most 255 characters")
+          @RequestHeader(name = IDEMPOTENCY_KEY_HEADER, required = false)
+          String idempotencyKey,
+      Authentication authentication) {
+    CreateTransactionResult result =
+        transactionService.createTransaction(request, authentication.getName(), idempotencyKey);
+    ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.CREATED);
+    if (result.replayed()) {
+      response.header(IDEMPOTENT_REPLAYED_HEADER, "true");
+    }
+    return response.body(result.response());
   }
 
   @PatchMapping("/{id}")
