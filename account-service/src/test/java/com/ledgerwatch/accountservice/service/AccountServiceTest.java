@@ -11,6 +11,7 @@ import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
 import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
@@ -19,7 +20,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentMatchers;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.Page;
@@ -28,6 +28,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.transaction.support.TransactionOperations;
 
 @SuppressWarnings("null")
 @ExtendWith(MockitoExtension.class)
@@ -35,13 +36,18 @@ public class AccountServiceTest {
 
   @Mock AccountRepository accountRepository;
 
-  @InjectMocks AccountService accountService;
+  AccountService accountService;
 
   private Account existing;
   private UUID existingId;
 
   @BeforeEach
   void setUp() {
+    accountService =
+        new AccountService(
+            accountRepository,
+            TransactionOperations.withoutTransaction(),
+            new BalanceRetryProperties(3, Duration.ZERO, Duration.ZERO));
     existingId = UUID.randomUUID();
     existing = new Account();
     existing.setOwnerName("Alice");
@@ -284,12 +290,45 @@ public class AccountServiceTest {
   }
 
   @Test
-  void applyBalanceDelta_propagatesOptimisticLockFailure() {
+  void applyBalanceDelta_retriesOptimisticLockFailureAgainstFreshRead() {
+    existing.setBalance(new BigDecimal("100.00"));
+    Account fresh = new Account();
+    fresh.setOwnerName("Alice");
+    fresh.setBalance(new BigDecimal("90.00")); // another writer debited 10 in between
+    when(accountRepository.findById(existingId))
+        .thenReturn(Optional.of(existing))
+        .thenReturn(Optional.of(fresh));
+    when(accountRepository.saveAndFlush(any()))
+        .thenThrow(new ObjectOptimisticLockingFailureException(Account.class, existingId))
+        .thenAnswer(inv -> inv.getArgument(0));
+
+    Account result = accountService.applyBalanceDelta(existingId, new BigDecimal("-25"));
+
+    assertThat(result).isSameAs(fresh);
+    assertThat(result.getBalance()).isEqualByComparingTo("65.00");
+    verify(accountRepository, times(2)).findById(existingId);
+  }
+
+  @Test
+  void applyBalanceDelta_rethrowsOptimisticLockFailureAfterMaxAttempts() {
     when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
     when(accountRepository.saveAndFlush(any()))
         .thenThrow(new ObjectOptimisticLockingFailureException(Account.class, existingId));
 
     assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, BigDecimal.TEN))
         .isInstanceOf(ObjectOptimisticLockingFailureException.class);
+
+    verify(accountRepository, times(3)).saveAndFlush(any());
+  }
+
+  @Test
+  void applyBalanceDelta_doesNotRetryBusinessRuleFailures() {
+    existing.setBalance(new BigDecimal("5.00"));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+    assertThatThrownBy(() -> accountService.applyBalanceDelta(existingId, new BigDecimal("-10")))
+        .isInstanceOf(InsufficientFundsException.class);
+
+    verify(accountRepository, times(1)).findById(existingId);
   }
 }

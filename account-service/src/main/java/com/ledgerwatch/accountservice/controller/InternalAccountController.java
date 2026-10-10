@@ -40,8 +40,8 @@ public class InternalAccountController {
       description =
           "Adds a signed delta to the account balance. Only ACTIVE accounts accept changes,"
               + " and a debit may not take the balance below zero."
-              + " Concurrent modification is detected with optimistic locking and returns 409;"
-              + " callers may re-read and retry.")
+              + " Concurrent modification is detected with optimistic locking and retried"
+              + " server-side; 409 is returned only if every retry conflicts.")
   @ApiResponses({
     @ApiResponse(responseCode = "200", description = "Delta applied"),
     @ApiResponse(
@@ -58,7 +58,7 @@ public class InternalAccountController {
         content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "409",
-        description = "Account is FROZEN/CLOSED, or was modified concurrently",
+        description = "Account is FROZEN/CLOSED, or concurrent-modification retries were exhausted",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "422",

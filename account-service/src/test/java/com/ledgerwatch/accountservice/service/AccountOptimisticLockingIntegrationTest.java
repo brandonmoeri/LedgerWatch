@@ -60,7 +60,7 @@ public class AccountOptimisticLockingIntegrationTest {
   }
 
   @Test
-  void concurrentDeltas_neverLoseUpdates() throws Exception {
+  void concurrentDeltas_areRetriedAndNeverLost() throws Exception {
     UUID id = seed("0");
     int threads = 8;
     ExecutorService pool = Executors.newFixedThreadPool(threads);
@@ -90,10 +90,10 @@ public class AccountOptimisticLockingIntegrationTest {
       }
 
       Account after = accountRepository.findById(id).orElseThrow();
-      // Every successful delta is reflected exactly once; every conflict left no trace.
-      assertThat(succeeded).isPositive();
-      assertThat(after.getBalance()).isEqualByComparingTo(BigDecimal.valueOf(succeeded));
-      assertThat(after.getVersion()).isEqualTo((long) succeeded);
+      // Conflicts are retried, so every delta lands, and lands exactly once.
+      assertThat(succeeded).isEqualTo(threads);
+      assertThat(after.getBalance()).isEqualByComparingTo(BigDecimal.valueOf(threads));
+      assertThat(after.getVersion()).isEqualTo((long) threads);
     } finally {
       pool.shutdownNow();
     }
