@@ -42,6 +42,30 @@
             </plugins>
         </pluginManagement>
         <plugins>
+            <!-- Exposes ${net.bytebuddy:byte-buddy-agent:jar} so Mockito's inline mock maker can be loaded as a -javaagent;
+                 JDK 21 blocks/warns on its default runtime self-attach ("Agent failed to start!"). -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.7.0</version>
+                <executions>
+                    <execution>
+                        <id>mockito-agent-path</id>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+                <configuration>
+                    <!-- @{argLine} keeps the JaCoCo agent set by prepare-agent -->
+                    <argLine>@{argLine} -javaagent:${net.bytebuddy:byte-buddy-agent:jar}</argLine>
+                </configuration>
+            </plugin>
             <plugin>
                 <groupId>com.diffplug.spotless</groupId>
                 <artifactId>spotless-maven-plugin</artifactId>
