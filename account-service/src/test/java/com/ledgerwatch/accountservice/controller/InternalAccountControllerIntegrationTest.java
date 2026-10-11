@@ -10,8 +10,15 @@ import com.ledgerwatch.accountservice.TestcontainersConfiguration;
 import com.ledgerwatch.accountservice.domain.Account;
 import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
+import com.ledgerwatch.accountservice.repository.BalanceAdjustmentRepository;
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -37,6 +44,7 @@ public class InternalAccountControllerIntegrationTest {
 
   @Autowired MockMvc mockMvc;
   @Autowired AccountRepository accountRepository;
+  @Autowired BalanceAdjustmentRepository adjustmentRepository;
 
   @AfterEach
   void cleanUp() {
@@ -120,6 +128,72 @@ public class InternalAccountControllerIntegrationTest {
     var after = accountRepository.findById(id).orElseThrow();
     assertThat(after.getVersion()).isEqualTo(before + 2);
     assertThat(after.getBalance()).isEqualByComparingTo("2");
+  }
+
+  @Test
+  void repeatedAdjustmentId_appliesDeltaOnce() throws Exception {
+    var id = seed("100.00", AccountStatus.ACTIVE);
+    String json = "{\"adjustmentId\": \"" + UUID.randomUUID() + "\", \"delta\": -40}";
+
+    adjust(id, json, SERVICE).andExpect(status().isOk()).andExpect(jsonPath("$.balance").value(60));
+    adjust(id, json, SERVICE).andExpect(status().isOk()).andExpect(jsonPath("$.balance").value(60));
+
+    assertThat(balanceOf(id)).isEqualByComparingTo("60");
+    assertThat(adjustmentRepository.count()).isEqualTo(1);
+  }
+
+  @Test
+  void adjustmentIdReusedWithDifferentDelta_returns409AndBalanceUnchanged() throws Exception {
+    var id = seed("100.00", AccountStatus.ACTIVE);
+    var adjustmentId = UUID.randomUUID();
+
+    adjust(id, "{\"adjustmentId\": \"" + adjustmentId + "\", \"delta\": 10}", SERVICE)
+        .andExpect(status().isOk());
+    adjust(id, "{\"adjustmentId\": \"" + adjustmentId + "\", \"delta\": 20}", SERVICE)
+        .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.detail").value(containsString(adjustmentId.toString())));
+
+    assertThat(balanceOf(id)).isEqualByComparingTo("110.00");
+  }
+
+  @Test
+  void rejectedAdjustment_isNotRecorded_soItCanBeRetried() throws Exception {
+    var id = seed("10.00", AccountStatus.ACTIVE);
+    String json = "{\"adjustmentId\": \"" + UUID.randomUUID() + "\", \"delta\": -40}";
+
+    adjust(id, json, SERVICE).andExpect(status().isUnprocessableEntity());
+    adjust(id, "{\"delta\": 50}", SERVICE).andExpect(status().isOk());
+    adjust(id, json, SERVICE).andExpect(status().isOk());
+
+    assertThat(balanceOf(id)).isEqualByComparingTo("20.00");
+  }
+
+  @Test
+  void concurrentRequestsWithSameAdjustmentId_applyDeltaOnce() throws Exception {
+    var id = seed("100.00", AccountStatus.ACTIVE);
+    String json = "{\"adjustmentId\": \"" + UUID.randomUUID() + "\", \"delta\": -10}";
+    int threads = 8;
+    var start = new CountDownLatch(1);
+    var pool = Executors.newFixedThreadPool(threads);
+    try {
+      List<Future<Integer>> results = new ArrayList<>();
+      for (int i = 0; i < threads; i++) {
+        Callable<Integer> call =
+            () -> {
+              start.await();
+              return adjust(id, json, SERVICE).andReturn().getResponse().getStatus();
+            };
+        results.add(pool.submit(call));
+      }
+      start.countDown();
+      for (Future<Integer> result : results) {
+        assertThat(result.get()).isEqualTo(200);
+      }
+    } finally {
+      pool.shutdownNow();
+    }
+
+    assertThat(balanceOf(id)).isEqualByComparingTo("90.00");
   }
 
   @Test

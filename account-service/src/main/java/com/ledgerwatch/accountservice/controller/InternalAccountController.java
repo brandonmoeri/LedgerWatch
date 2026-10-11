@@ -41,7 +41,9 @@ public class InternalAccountController {
           "Adds a signed delta to the account balance. Only ACTIVE accounts accept changes,"
               + " and a debit may not take the balance below zero."
               + " Concurrent modification is detected with optimistic locking and retried"
-              + " server-side; 409 is returned only if every retry conflicts.")
+              + " server-side; 409 is returned only if every retry conflicts. With an"
+              + " adjustmentId the delta is applied at most once: a repeat returns 200 without"
+              + " changing the balance, so callers can safely retry after a lost response.")
   @ApiResponses({
     @ApiResponse(responseCode = "200", description = "Delta applied"),
     @ApiResponse(
@@ -58,7 +60,9 @@ public class InternalAccountController {
         content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "409",
-        description = "Account is FROZEN/CLOSED, or concurrent-modification retries were exhausted",
+        description =
+            "Account is FROZEN/CLOSED, concurrent-modification retries were exhausted, or"
+                + " the adjustmentId was already used with a different account or delta",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "422",
@@ -69,6 +73,7 @@ public class InternalAccountController {
   })
   public AccountResponse applyBalanceDelta(
       @PathVariable UUID id, @Valid @RequestBody BalanceAdjustmentRequest request) {
-    return AccountResponse.from(accountService.applyBalanceDelta(id, request.delta()));
+    return AccountResponse.from(
+        accountService.applyBalanceDelta(id, request.delta(), request.adjustmentId()));
   }
 }

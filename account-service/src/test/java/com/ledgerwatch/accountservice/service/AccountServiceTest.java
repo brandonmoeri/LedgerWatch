@@ -6,9 +6,11 @@ import static org.mockito.Mockito.*;
 
 import com.ledgerwatch.accountservice.domain.Account;
 import com.ledgerwatch.accountservice.domain.AccountStatus;
+import com.ledgerwatch.accountservice.domain.BalanceAdjustment;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
+import com.ledgerwatch.accountservice.repository.BalanceAdjustmentRepository;
 import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -35,6 +37,7 @@ import org.springframework.transaction.support.TransactionOperations;
 public class AccountServiceTest {
 
   @Mock AccountRepository accountRepository;
+  @Mock BalanceAdjustmentRepository adjustmentRepository;
 
   AccountService accountService;
 
@@ -46,6 +49,7 @@ public class AccountServiceTest {
     accountService =
         new AccountService(
             accountRepository,
+            adjustmentRepository,
             TransactionOperations.withoutTransaction(),
             new BalanceRetryProperties(3, Duration.ZERO, Duration.ZERO));
     existingId = UUID.randomUUID();
@@ -330,5 +334,82 @@ public class AccountServiceTest {
         .isInstanceOf(InsufficientFundsException.class);
 
     verify(accountRepository, times(1)).findById(existingId);
+  }
+
+  // --- applyBalanceDelta with adjustmentId ---
+
+  @Test
+  void applyBalanceDelta_recordsAdjustmentIdWithTheChange() {
+    UUID adjustmentId = UUID.randomUUID();
+    existing.setBalance(new BigDecimal("100.00"));
+    when(adjustmentRepository.findById(adjustmentId)).thenReturn(Optional.empty());
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+    Account result =
+        accountService.applyBalanceDelta(existingId, new BigDecimal("-30"), adjustmentId);
+
+    assertThat(result.getBalance()).isEqualByComparingTo("70.00");
+    verify(adjustmentRepository)
+        .saveAndFlush(
+            ArgumentMatchers.<BalanceAdjustment>argThat(
+                a ->
+                    a.getId().equals(adjustmentId)
+                        && a.getAccountId().equals(existingId)
+                        && a.getDelta().compareTo(new BigDecimal("-30")) == 0));
+  }
+
+  @Test
+  void applyBalanceDelta_replaysAlreadyAppliedAdjustmentWithoutChangingBalance() {
+    UUID adjustmentId = UUID.randomUUID();
+    existing.setBalance(new BigDecimal("70.00"));
+    existing.setStatus(AccountStatus.FROZEN); // frozen after the original was applied
+    when(adjustmentRepository.findById(adjustmentId))
+        .thenReturn(
+            Optional.of(new BalanceAdjustment(adjustmentId, existingId, new BigDecimal("-30.0"))));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+    Account result =
+        accountService.applyBalanceDelta(existingId, new BigDecimal("-30"), adjustmentId);
+
+    assertThat(result.getBalance()).isEqualByComparingTo("70.00");
+    verify(accountRepository, never()).saveAndFlush(any());
+    verify(adjustmentRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void applyBalanceDelta_rejectsAdjustmentIdReusedWithDifferentDelta() {
+    UUID adjustmentId = UUID.randomUUID();
+    when(adjustmentRepository.findById(adjustmentId))
+        .thenReturn(Optional.of(new BalanceAdjustment(adjustmentId, existingId, BigDecimal.TEN)));
+
+    assertThatThrownBy(
+            () -> accountService.applyBalanceDelta(existingId, BigDecimal.ONE, adjustmentId))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining(adjustmentId.toString());
+
+    verify(accountRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void applyBalanceDelta_rejectsAdjustmentIdReusedForDifferentAccount() {
+    UUID adjustmentId = UUID.randomUUID();
+    when(adjustmentRepository.findById(adjustmentId))
+        .thenReturn(
+            Optional.of(new BalanceAdjustment(adjustmentId, UUID.randomUUID(), BigDecimal.TEN)));
+
+    assertThatThrownBy(
+            () -> accountService.applyBalanceDelta(existingId, BigDecimal.TEN, adjustmentId))
+        .isInstanceOf(IllegalStateException.class);
+  }
+
+  @Test
+  void applyBalanceDelta_withoutAdjustmentIdDoesNotTouchAdjustmentRepository() {
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+    accountService.applyBalanceDelta(existingId, BigDecimal.TEN);
+
+    verifyNoInteractions(adjustmentRepository);
   }
 }
