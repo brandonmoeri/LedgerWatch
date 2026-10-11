@@ -40,6 +40,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.test.util.ReflectionTestUtils;
 
 @SuppressWarnings("null")
 @ExtendWith(MockitoExtension.class)
@@ -89,19 +90,29 @@ class TransactionServiceTest {
 
     InOrder inOrder = inOrder(transactionRepository, accountServiceClient);
     inOrder.verify(transactionRepository).saveAndFlush(any());
-    inOrder.verify(accountServiceClient).applyBalanceDelta(accountId, new BigDecimal("-50.00"));
+    inOrder
+        .verify(accountServiceClient)
+        .applyBalanceDelta(eq(accountId), eq(new BigDecimal("-50.00")), any());
   }
 
   @Test
-  void create_credit_appliesPositiveDelta() {
-    when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+  void create_credit_appliesPositiveDeltaKeyedByTransactionId() {
+    UUID transactionId = UUID.randomUUID();
+    when(transactionRepository.saveAndFlush(any()))
+        .thenAnswer(
+            inv -> {
+              Transaction tx = inv.getArgument(0);
+              ReflectionTestUtils.setField(tx, "id", transactionId);
+              return tx;
+            });
     UUID accountId = UUID.randomUUID();
 
     transactionService.createTransaction(
         new CreateTransactionRequest(
             accountId, TransactionType.CREDIT, new BigDecimal("75.25"), null));
 
-    verify(accountServiceClient).applyBalanceDelta(accountId, new BigDecimal("75.25"));
+    verify(accountServiceClient)
+        .applyBalanceDelta(accountId, new BigDecimal("75.25"), transactionId);
   }
 
   @Test
@@ -109,7 +120,7 @@ class TransactionServiceTest {
     when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
     doThrow(new IllegalStateException("frozen"))
         .when(accountServiceClient)
-        .applyBalanceDelta(any(), any());
+        .applyBalanceDelta(any(), any(), any());
 
     assertThatThrownBy(
             () ->
@@ -132,7 +143,7 @@ class TransactionServiceTest {
 
     assertThat(result.replayed()).isFalse();
     verifyNoInteractions(idempotencyRecordRepository);
-    verify(accountServiceClient).applyBalanceDelta(any(), any());
+    verify(accountServiceClient).applyBalanceDelta(any(), any(), any());
   }
 
   @Test
@@ -157,7 +168,9 @@ class TransactionServiceTest {
     inOrder
         .verify(idempotencyRecordRepository)
         .complete(eq("admin"), eq("key-1"), any(), contains("\"coffee\""));
-    inOrder.verify(accountServiceClient).applyBalanceDelta(accountId, new BigDecimal("-5.00"));
+    inOrder
+        .verify(accountServiceClient)
+        .applyBalanceDelta(eq(accountId), eq(new BigDecimal("-5.00")), any());
   }
 
   @Test

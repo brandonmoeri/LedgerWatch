@@ -134,7 +134,7 @@ accounts.account
 | `GET` | `/accounts/{id}` | Any role | Fetch by UUID |
 | `POST` | `/accounts` | `ADMIN` | Create (`ownerName`, optional `initialBalance`) |
 | `PATCH` | `/accounts/{id}` | `ADMIN` | Update `ownerName` and/or `status` |
-| `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 422 (insufficient funds) if a negative delta would take the balance below zero; a debit down to exactly 0 is allowed, and credits are never blocked. 409 if the account is `FROZEN`/`CLOSED` or was modified concurrently (optimistic lock); callers re-read and retry |
+| `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 422 (insufficient funds) if a negative delta would take the balance below zero; a debit down to exactly 0 is allowed, and credits are never blocked. 409 if the account is `FROZEN`/`CLOSED`. Optimistic-lock conflicts are retried server-side, each attempt in a fresh transaction with jittered exponential backoff (`balance-retry.max-attempts` 10, `initial-backoff` 5ms, `max-backoff` 200ms). 409 only if every attempt conflicts |
 
 #### Configuration
 
@@ -161,7 +161,7 @@ Key dependencies: same as account-service. It validates JWTs but does not issue 
 - **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
 - **Ordering:** in one local DB transaction, the row is inserted and flushed, then account-service is called. Any failure from that call rolls back the insert.
-- **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account or optimistic-lock conflict) → `409`, with no automatic retry; `422` → `InsufficientFundsException` → `422` with the same insufficient-funds problem type; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
+- **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account, or optimistic-lock retries exhausted inside account-service) → `409`, with no further retry here; `422` → `InsufficientFundsException` → `422` with the same insufficient-funds problem type; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
 - **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
 
 #### Idempotent creates

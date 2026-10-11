@@ -44,6 +44,16 @@
             <groupId>org.springdoc</groupId>
             <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
         </dependency>
+        <!-- Retry + circuit breaker around AccountServiceClient; AOP drives the annotations. -->
+        <dependency>
+            <groupId>io.github.resilience4j</groupId>
+            <artifactId>resilience4j-spring-boot3</artifactId>
+            <version>${resilience4j.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-aop</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -144,5 +154,6 @@
         <flyway.user>ledger</flyway.user>
         <flyway.password>ledger</flyway.password>
         <wiremock.version>3.9.2</wiremock.version>
+        <resilience4j.version>2.3.0</resilience4j.version>
     </properties>
 </project>

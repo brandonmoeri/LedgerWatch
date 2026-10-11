@@ -27,11 +27,41 @@ account-service:
   connect-timeout: ${ACCOUNT_SERVICE_CONNECT_TIMEOUT:2s}
   read-timeout: ${ACCOUNT_SERVICE_READ_TIMEOUT:5s}
 
+# Resilience for AccountServiceClient. Only AccountServiceUnavailableException (I/O failure,
+# timeout, 5xx) is retried or counted by the breaker; 4xx answers are final. Retries are safe
+# because account-service applies each adjustment id (the transaction id) at most once.
+resilience4j:
+  retry:
+    instances:
+      accountService:
+        max-attempts: 3                     # 1 call + 2 retries
+        wait-duration: 200ms
+        enable-exponential-backoff: true    # ~200ms, ~400ms ...
+        exponential-backoff-multiplier: 2
+        exponential-max-wait-duration: 2s
+        enable-randomized-wait: true        # +/-50% jitter so callers don't retry in lockstep
+        randomized-wait-factor: 0.5
+        retry-exceptions:
+          - com.ledgerwatch.transactionservice.client.AccountServiceUnavailableException
+  circuitbreaker:
+    instances:
+      accountService:
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        automatic-transition-from-open-to-half-open-enabled: true
+        permitted-number-of-calls-in-half-open-state: 3
+        record-exceptions:
+          - com.ledgerwatch.transactionservice.client.AccountServiceUnavailableException
+
 management:
   endpoints:
     web:
       exposure:
-        include: health
+        # circuitbreakers / circuitbreakerevents require ROLE_ADMIN (see SecurityConfig).
+        include: health, circuitbreakers, circuitbreakerevents
   endpoint:
     health:
       show-details: never

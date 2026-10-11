@@ -105,7 +105,7 @@ class IdempotentCreateTransactionIntegrationTest {
 
     assertThat(body(second)).isEqualTo(body(first));
     assertThat(transactionRepository.count()).isEqualTo(1);
-    verify(accountServiceClient, times(1)).applyBalanceDelta(any(), any());
+    verify(accountServiceClient, times(1)).applyBalanceDelta(any(), any(), any());
   }
 
   @Test
@@ -156,7 +156,7 @@ class IdempotentCreateTransactionIntegrationTest {
     String key = UUID.randomUUID().toString();
     doThrow(new IllegalStateException("Account is frozen"))
         .when(accountServiceClient)
-        .applyBalanceDelta(any(), any());
+        .applyBalanceDelta(any(), any(), any());
 
     create("admin", key, request).andExpect(status().isConflict());
     assertThat(idempotencyRecordRepository.count()).isZero();
@@ -180,7 +180,7 @@ class IdempotentCreateTransactionIntegrationTest {
               return null;
             })
         .when(accountServiceClient)
-        .applyBalanceDelta(any(), any());
+        .applyBalanceDelta(any(), any(), any());
 
     Callable<MvcResult> call = () -> create("admin", key, request).andReturn();
     ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -201,7 +201,7 @@ class IdempotentCreateTransactionIntegrationTest {
       pool.shutdownNow();
     }
     assertThat(transactionRepository.count()).isEqualTo(1);
-    verify(accountServiceClient, times(1)).applyBalanceDelta(any(), any());
+    verify(accountServiceClient, times(1)).applyBalanceDelta(any(), any(), any());
   }
 
   @Test

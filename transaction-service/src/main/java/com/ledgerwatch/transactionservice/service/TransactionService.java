@@ -221,7 +221,8 @@ public class TransactionService {
   private void applyToBalance(Transaction saved) {
     BigDecimal delta =
         saved.getType() == TransactionType.CREDIT ? saved.getAmount() : saved.getAmount().negate();
-    accountServiceClient.applyBalanceDelta(saved.getAccountId(), delta);
+    // The transaction id doubles as the adjustment id, so client retries can't apply it twice.
+    accountServiceClient.applyBalanceDelta(saved.getAccountId(), delta, saved.getId());
   }
 
   @Transactional
