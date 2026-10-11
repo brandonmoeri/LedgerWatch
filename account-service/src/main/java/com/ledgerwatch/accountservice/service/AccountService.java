@@ -15,6 +15,7 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -105,7 +106,8 @@ public class AccountService {
    * to {@link BalanceRetryProperties#maxAttempts()} times with jittered exponential backoff. If
    * every attempt conflicts, the last {@link OptimisticLockingFailureException} propagates (HTTP
    * 409). Two concurrent requests with the same {@code adjustmentId} serialize the same way: the
-   * loser's retry sees the winner's record and replays.
+   * loser either conflicts on the account version or on the adjustment's primary key, and its retry
+   * sees the winner's record and replays.
    *
    * <p>Runs outside any caller transaction ({@code NOT_SUPPORTED}): a retry inside a transaction
    * that already hit a conflict would reuse its rolled-back state and stale persistence context.
@@ -151,7 +153,17 @@ public class AccountService {
     // Flush now so a version conflict surfaces here rather than at commit.
     Account saved = repo.saveAndFlush(account);
     if (adjustmentId != null) {
-      adjustmentRepo.saveAndFlush(new BalanceAdjustment(adjustmentId, id, delta));
+      try {
+        adjustmentRepo.saveAndFlush(new BalanceAdjustment(adjustmentId, id, delta));
+      } catch (DataIntegrityViolationException e) {
+        // The record check above and the account read are separate statements, so a concurrent
+        // request with the same id can commit between them: we then miss its record but read its
+        // committed balance, and only the primary key catches the duplicate. Treat it like a
+        // version conflict so the retry rolls this attempt back and replays the winner's record.
+        // (The account row is updated and locked above, so the account_id FK cannot be the cause.)
+        throw new OptimisticLockingFailureException(
+            "Balance adjustment " + adjustmentId + " was applied concurrently", e);
+      }
     }
     return saved;
   }
