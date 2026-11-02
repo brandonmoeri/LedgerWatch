@@ -7,6 +7,7 @@ import static org.mockito.Mockito.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.IdempotencyRecord;
+import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
@@ -16,6 +17,7 @@ import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse;
 import com.ledgerwatch.transactionservice.dto.TransactionResponse;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
 import com.ledgerwatch.transactionservice.repository.IdempotencyRecordRepository;
+import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -48,6 +50,7 @@ class TransactionServiceTest {
 
   @Mock TransactionRepository transactionRepository;
   @Mock IdempotencyRecordRepository idempotencyRecordRepository;
+  @Mock OutboxEventRepository outboxEventRepository;
   @Mock AccountServiceClient accountServiceClient;
   @Spy ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
   @InjectMocks TransactionService transactionService;
@@ -113,6 +116,39 @@ class TransactionServiceTest {
 
     verify(accountServiceClient)
         .applyBalanceDelta(accountId, new BigDecimal("75.25"), transactionId);
+  }
+
+  @Test
+  void create_writesTransactionCreatedOutboxEventBeforeCallingAccountService() throws Exception {
+    UUID transactionId = UUID.randomUUID();
+    when(transactionRepository.saveAndFlush(any()))
+        .thenAnswer(
+            inv -> {
+              Transaction tx = inv.getArgument(0);
+              ReflectionTestUtils.setField(tx, "id", transactionId);
+              return tx;
+            });
+    UUID accountId = UUID.randomUUID();
+
+    transactionService.createTransaction(
+        new CreateTransactionRequest(
+            accountId, TransactionType.DEBIT, new BigDecimal("12.34"), "Coffee"));
+
+    ArgumentCaptor<OutboxEvent> event = ArgumentCaptor.forClass(OutboxEvent.class);
+    InOrder inOrder = inOrder(transactionRepository, outboxEventRepository, accountServiceClient);
+    inOrder.verify(transactionRepository).saveAndFlush(any());
+    inOrder.verify(outboxEventRepository).saveAndFlush(event.capture());
+    inOrder.verify(accountServiceClient).applyBalanceDelta(any(), any(), any());
+
+    assertThat(event.getValue().getAggregateType()).isEqualTo("Transaction");
+    assertThat(event.getValue().getAggregateId()).isEqualTo(transactionId);
+    assertThat(event.getValue().getEventType()).isEqualTo("TransactionCreated");
+    var payload = objectMapper.readTree(event.getValue().getPayload());
+    assertThat(payload.get("transactionId").asText()).isEqualTo(transactionId.toString());
+    assertThat(payload.get("accountId").asText()).isEqualTo(accountId.toString());
+    assertThat(payload.get("type").asText()).isEqualTo("DEBIT");
+    assertThat(payload.get("amount").decimalValue()).isEqualByComparingTo("12.34");
+    assertThat(payload.get("description").asText()).isEqualTo("Coffee");
   }
 
   @Test

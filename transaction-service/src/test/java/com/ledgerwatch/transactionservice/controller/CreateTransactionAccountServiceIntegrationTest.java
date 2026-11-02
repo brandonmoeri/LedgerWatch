@@ -19,6 +19,7 @@ import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
+import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
@@ -79,6 +80,7 @@ class CreateTransactionAccountServiceIntegrationTest {
   @Autowired MockMvc mockMvc;
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
+  @Autowired OutboxEventRepository outboxEventRepository;
   @Autowired JwtDecoder jwtDecoder;
   @Autowired CircuitBreakerRegistry circuitBreakerRegistry;
 
@@ -93,6 +95,7 @@ class CreateTransactionAccountServiceIntegrationTest {
 
   @AfterEach
   void cleanUp() {
+    outboxEventRepository.deleteAll();
     transactionRepository.deleteAll();
   }
 
@@ -154,6 +157,27 @@ class CreateTransactionAccountServiceIntegrationTest {
   }
 
   @Test
+  void create_commitsTransactionCreatedOutboxEventWithTheRow() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubAdjustment(accountId, 200);
+
+    createTransaction(accountId, TransactionType.CREDIT, "250.00").andExpect(status().isCreated());
+
+    UUID transactionId = transactionRepository.findAll().get(0).getId();
+    var events = outboxEventRepository.findByAggregateIdOrderByCreatedAt(transactionId);
+    assertThat(events).hasSize(1);
+    var event = events.get(0);
+    assertThat(event.getAggregateType()).isEqualTo("Transaction");
+    assertThat(event.getEventType()).isEqualTo("TransactionCreated");
+    assertThat(event.getPublishedAt()).isNull();
+    var payload = objectMapper.readTree(event.getPayload());
+    assertThat(payload.get("transactionId").asText()).isEqualTo(transactionId.toString());
+    assertThat(payload.get("accountId").asText()).isEqualTo(accountId.toString());
+    assertThat(payload.get("type").asText()).isEqualTo("CREDIT");
+    assertThat(payload.get("amount").decimalValue()).isEqualByComparingTo("250.00");
+  }
+
+  @Test
   void debit_postsNegativeDelta() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 200);
@@ -176,6 +200,7 @@ class CreateTransactionAccountServiceIntegrationTest {
 
     verifyAttempts(1, accountId);
     assertThat(transactionRepository.count()).isZero();
+    assertThat(outboxEventRepository.count()).isZero();
   }
 
   @Test
@@ -187,6 +212,7 @@ class CreateTransactionAccountServiceIntegrationTest {
 
     verifyAttempts(1, accountId);
     assertThat(transactionRepository.count()).isZero();
+    assertThat(outboxEventRepository.count()).isZero();
   }
 
   @Test
@@ -204,6 +230,7 @@ class CreateTransactionAccountServiceIntegrationTest {
 
     verifyAttempts(1, accountId);
     assertThat(transactionRepository.count()).isZero();
+    assertThat(outboxEventRepository.count()).isZero();
   }
 
   @Test
@@ -216,6 +243,7 @@ class CreateTransactionAccountServiceIntegrationTest {
 
     verifyAttempts(MAX_ATTEMPTS, accountId);
     assertThat(transactionRepository.count()).isZero();
+    assertThat(outboxEventRepository.count()).isZero();
   }
 
   @Test
@@ -228,6 +256,7 @@ class CreateTransactionAccountServiceIntegrationTest {
 
     verifyAttempts(1, accountId);
     assertThat(transactionRepository.count()).isZero();
+    assertThat(outboxEventRepository.count()).isZero();
   }
 
   @Test
@@ -244,6 +273,7 @@ class CreateTransactionAccountServiceIntegrationTest {
 
     verifyAttempts(MAX_ATTEMPTS, accountId);
     assertThat(transactionRepository.count()).isZero();
+    assertThat(outboxEventRepository.count()).isZero();
   }
 
   @Test

@@ -3,6 +3,7 @@ package com.ledgerwatch.transactionservice.service;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
+import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
@@ -13,7 +14,9 @@ import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse.BalancePo
 import com.ledgerwatch.transactionservice.dto.DashboardSummaryResponse.TypeSpending;
 import com.ledgerwatch.transactionservice.dto.TransactionResponse;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
+import com.ledgerwatch.transactionservice.event.TransactionCreatedEvent;
 import com.ledgerwatch.transactionservice.repository.IdempotencyRecordRepository;
+import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionSpecifications;
 import java.io.UncheckedIOException;
@@ -47,16 +50,19 @@ public class TransactionService {
 
   private final TransactionRepository repo;
   private final IdempotencyRecordRepository idempotencyRepo;
+  private final OutboxEventRepository outboxRepo;
   private final AccountServiceClient accountServiceClient;
   private final ObjectMapper objectMapper;
 
   public TransactionService(
       TransactionRepository repo,
       IdempotencyRecordRepository idempotencyRepo,
+      OutboxEventRepository outboxRepo,
       AccountServiceClient accountServiceClient,
       ObjectMapper objectMapper) {
     this.repo = repo;
     this.idempotencyRepo = idempotencyRepo;
+    this.outboxRepo = outboxRepo;
     this.accountServiceClient = accountServiceClient;
     this.objectMapper = objectMapper;
   }
@@ -119,9 +125,10 @@ public class TransactionService {
   }
 
   /**
-   * Inserts the transaction, then applies it to the account balance in account-service. The insert
-   * is flushed first so local constraint failures surface before any remote side effect; if the
-   * balance adjustment is rejected or fails, the exception rolls the insert back.
+   * Inserts the transaction and its {@code TransactionCreated} outbox event, then applies it to the
+   * account balance in account-service. Both rows are flushed first so local constraint failures
+   * surface before any remote side effect; if the balance adjustment is rejected or fails, the
+   * exception rolls both back, so no event is ever left for a transaction that didn't commit.
    */
   @Transactional
   public Transaction createTransaction(CreateTransactionRequest request) {
@@ -201,9 +208,9 @@ public class TransactionService {
     }
   }
 
-  private String toJson(TransactionResponse response) {
+  private String toJson(Object value) {
     try {
-      return objectMapper.writeValueAsString(response);
+      return objectMapper.writeValueAsString(value);
     } catch (JsonProcessingException e) {
       throw new UncheckedIOException(e);
     }
@@ -215,7 +222,14 @@ public class TransactionService {
     tx.setType(request.type());
     tx.setAmount(request.amount());
     tx.setDescription(request.description());
-    return repo.saveAndFlush(tx);
+    Transaction saved = repo.saveAndFlush(tx);
+    outboxRepo.saveAndFlush(
+        new OutboxEvent(
+            TransactionCreatedEvent.AGGREGATE_TYPE,
+            saved.getId(),
+            TransactionCreatedEvent.EVENT_TYPE,
+            toJson(TransactionCreatedEvent.from(saved))));
+    return saved;
   }
 
   private void applyToBalance(Transaction saved) {

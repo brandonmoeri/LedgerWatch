@@ -19,6 +19,7 @@ import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
 import com.ledgerwatch.transactionservice.repository.IdempotencyRecordRepository;
+import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import java.math.BigDecimal;
 import java.util.List;
@@ -52,12 +53,14 @@ class IdempotentCreateTransactionIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
   @Autowired IdempotencyRecordRepository idempotencyRecordRepository;
+  @Autowired OutboxEventRepository outboxEventRepository;
 
   @MockBean AccountServiceClient accountServiceClient;
 
   @AfterEach
   void cleanUp() {
     idempotencyRecordRepository.deleteAll();
+    outboxEventRepository.deleteAll();
     transactionRepository.deleteAll();
   }
 
@@ -105,6 +108,7 @@ class IdempotentCreateTransactionIntegrationTest {
 
     assertThat(body(second)).isEqualTo(body(first));
     assertThat(transactionRepository.count()).isEqualTo(1);
+    assertThat(outboxEventRepository.count()).isEqualTo(1);
     verify(accountServiceClient, times(1)).applyBalanceDelta(any(), any(), any());
   }
 

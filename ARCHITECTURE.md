@@ -160,9 +160,17 @@ Key dependencies: same as account-service. It validates JWTs but does not issue 
 
 - **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
-- **Ordering:** in one local DB transaction, the row is inserted and flushed, then account-service is called. Any failure from that call rolls back the insert.
+- **Ordering:** in one local DB transaction, the row and its `TransactionCreated` outbox event (below) are inserted and flushed, then account-service is called. Any failure from that call rolls back both.
 - **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account, or optimistic-lock retries exhausted inside account-service) → `409`, with no further retry here; `422` → `InsufficientFundsException` → `422` with the same insufficient-funds problem type; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
-- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
+- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox. The outbox table now exists, but the balance call is still synchronous, so the gap stays open until a relay publishes the events and account-service applies balances from them.
+
+#### Transactional outbox
+
+Each created transaction also writes one row to `outbox_event` in the same local DB transaction, so an event exists only if its transaction committed. Idempotent replays write no new event.
+
+- **Event:** `aggregate_type = 'Transaction'`, `aggregate_id` = the transaction id, `event_type = 'TransactionCreated'`. The `payload` (JSONB) holds `transactionId`, `accountId`, `type`, `amount`, `description` and `createdAt`.
+- **Delivery:** nothing publishes yet. A relay will read rows `WHERE published_at IS NULL` in `created_at` order (a partial index covers this), publish them, and set `published_at`. Delivery will be at-least-once, so consumers must de-duplicate on the event `id`.
+- `PATCH` updates don't emit events yet.
 
 #### Idempotent creates
 
@@ -197,6 +205,16 @@ transactions.idempotency_record                       -- V2
   response_body   TEXT                                 -- original 201 body (JSON)
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
   UNIQUE (caller, idempotency_key)
+
+transactions.outbox_event                             -- V3
+  id             UUID PK  DEFAULT gen_random_uuid()    -- event id; consumers de-dupe on it
+  aggregate_type VARCHAR(64) NOT NULL                  -- 'Transaction'
+  aggregate_id   UUID NOT NULL                         -- transaction id; no FK
+  event_type     VARCHAR(64) NOT NULL                  -- 'TransactionCreated'
+  payload        JSONB NOT NULL
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  published_at   TIMESTAMPTZ                           -- NULL until relayed
+  INDEX (created_at) WHERE published_at IS NULL
 ```
 
 #### REST API
