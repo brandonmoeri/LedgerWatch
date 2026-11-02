@@ -17,6 +17,11 @@ public record TransactionCreatedEvent(
   public static final String AGGREGATE_TYPE = "Transaction";
   public static final String EVENT_TYPE = "TransactionCreated";
 
+  /** The signed change to the account balance: {@code +amount} for CREDIT, {@code -amount} else. */
+  public BigDecimal balanceDelta() {
+    return type == TransactionType.CREDIT ? amount : amount.negate();
+  }
+
   public static TransactionCreatedEvent from(Transaction t) {
     return new TransactionCreatedEvent(
         t.getId(),

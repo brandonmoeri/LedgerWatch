@@ -29,6 +29,9 @@ import org.springframework.web.client.RestClient;
 @EnableConfigurationProperties(AccountServiceProperties.class)
 public class AccountServiceClient {
 
+  /** Name of the resilience4j retry and circuit-breaker instances wrapping these calls. */
+  public static final String RESILIENCE_INSTANCE = "accountService";
+
   private final RestClient restClient;
 
   public AccountServiceClient(
@@ -68,8 +71,8 @@ public class AccountServiceClient {
    * @throws AccountServiceException account-service returned another unexpected status
    * @throws CallNotPermittedException the circuit breaker is open; no request was sent
    */
-  @Retry(name = "accountService")
-  @CircuitBreaker(name = "accountService")
+  @Retry(name = RESILIENCE_INSTANCE)
+  @CircuitBreaker(name = RESILIENCE_INSTANCE)
   public void applyBalanceDelta(UUID accountId, BigDecimal delta, UUID adjustmentId) {
     try {
       restClient

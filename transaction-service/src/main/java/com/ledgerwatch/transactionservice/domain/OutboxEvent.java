@@ -38,6 +38,18 @@ public class OutboxEvent {
   @Column(name = "published_at")
   private Instant publishedAt;
 
+  @Column(nullable = false)
+  private int attempts;
+
+  @Column(name = "next_attempt_at", nullable = false)
+  private Instant nextAttemptAt = createdAt;
+
+  @Column(name = "last_error", columnDefinition = "text")
+  private String lastError;
+
+  @Column(name = "failed_at")
+  private Instant failedAt;
+
   protected OutboxEvent() {}
 
   public OutboxEvent(String aggregateType, UUID aggregateId, String eventType, String payload) {
@@ -45,6 +57,30 @@ public class OutboxEvent {
     this.aggregateId = aggregateId;
     this.eventType = eventType;
     this.payload = payload;
+  }
+
+  /** Holds the event until {@code until}, so other publishers skip it while it's being sent. */
+  public void lease(Instant until) {
+    this.nextAttemptAt = until;
+  }
+
+  public void markPublished(Instant at) {
+    this.publishedAt = at;
+    this.lastError = null;
+  }
+
+  /** Records a transient failure and makes the event due again at {@code retryAt}. */
+  public void scheduleRetry(Instant retryAt, String error) {
+    this.attempts++;
+    this.nextAttemptAt = retryAt;
+    this.lastError = error;
+  }
+
+  /** Parks the event: the consumer rejected it, so it is never retried automatically. */
+  public void markFailed(Instant at, String error) {
+    this.attempts++;
+    this.failedAt = at;
+    this.lastError = error;
   }
 
   public UUID getId() {
@@ -73,5 +109,21 @@ public class OutboxEvent {
 
   public Instant getPublishedAt() {
     return publishedAt;
+  }
+
+  public int getAttempts() {
+    return attempts;
+  }
+
+  public Instant getNextAttemptAt() {
+    return nextAttemptAt;
+  }
+
+  public String getLastError() {
+    return lastError;
+  }
+
+  public Instant getFailedAt() {
+    return failedAt;
   }
 }

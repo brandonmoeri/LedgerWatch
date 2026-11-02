@@ -162,14 +162,18 @@ Key dependencies: same as account-service. It validates JWTs but does not issue 
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
 - **Ordering:** in one local DB transaction, the row and its `TransactionCreated` outbox event (below) are inserted and flushed, then account-service is called. Any failure from that call rolls back both.
 - **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account, or optimistic-lock retries exhausted inside account-service) → `409`, with no further retry here; `422` → `InsufficientFundsException` → `422` with the same insufficient-funds problem type; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
-- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox. The outbox table now exists, but the balance call is still synchronous, so the gap stays open until a relay publishes the events and account-service applies balances from them.
+- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox. The outbox publisher (below) replays each committed transaction's adjustment, but the balance call is still synchronous and happens first, so the gap stays open until `POST /transactions` stops calling account-service directly and leaves the balance to the publisher.
 
 #### Transactional outbox
 
 Each created transaction also writes one row to `outbox_event` in the same local DB transaction, so an event exists only if its transaction committed. Idempotent replays write no new event.
 
 - **Event:** `aggregate_type = 'Transaction'`, `aggregate_id` = the transaction id, `event_type = 'TransactionCreated'`. The `payload` (JSONB) holds `transactionId`, `accountId`, `type`, `amount`, `description` and `createdAt`.
-- **Delivery:** nothing publishes yet. A relay will read rows `WHERE published_at IS NULL` in `created_at` order (a partial index covers this), publish them, and set `published_at`. Delivery will be at-least-once, so consumers must de-duplicate on the event `id`.
+- **Delivery:** `OutboxPublisher` polls on a `@Scheduled` fixed delay. Each poll claims up to `batch-size` due rows (`published_at` and `failed_at` null, `next_attempt_at <= now`, oldest first) with `FOR UPDATE SKIP LOCKED` in a short transaction, so concurrent instances split the queue. The claim leases each row by moving `next_attempt_at` forward by `lease`. Rows are then delivered one at a time outside any DB transaction. If an instance dies mid-batch, its leases expire and another poll picks the rows up again.
+- **What delivery means:** account-service has no event endpoint, so a `TransactionCreated` event becomes the same `POST /internal/accounts/{id}/balance-adjustments` the create already made, with `adjustmentId` = the transaction id (not the event id). account-service applies each adjustment id at most once, so today every delivery is a no-op replay, and at-least-once redelivery is safe.
+- **Outcomes:** success sets `published_at`. `AccountServiceUnavailableException` (I/O, timeout or 5xx, after the client's own retries) increments `attempts`, records `last_error`, and backs the row off exponentially: `initial-backoff * 2^(attempts-1)`, capped at `max-backoff`, with no limit on attempts. Any other failure (404, 409, 422, unknown event type, unreadable payload) parks the row with `failed_at`. Parked rows are never retried automatically; to retry one, set `failed_at` back to null.
+- **Circuit breaker:** the publisher shares the `accountService` breaker with `POST /transactions`. While it is open, polls are skipped. If it trips mid-batch, the rest of the batch is released (`next_attempt_at = now`, `attempts` unchanged).
+- **Configuration** (`outbox.publisher.*`): `enabled` (`OUTBOX_PUBLISHER_ENABLED`, default `true`; the `test` profile sets `false` and tests call `publishPending()` directly), `poll-interval` (`OUTBOX_PUBLISHER_POLL_INTERVAL`, default `1s`), `batch-size` (`50`), `lease` (`2m`; keep it longer than a batch's worst-case delivery time, or a slow batch is delivered twice, which is harmless), `initial-backoff` (`1s`), `max-backoff` (`5m`).
 - `PATCH` updates don't emit events yet.
 
 #### Idempotent creates
@@ -214,7 +218,11 @@ transactions.outbox_event                             -- V3
   payload        JSONB NOT NULL
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
   published_at   TIMESTAMPTZ                           -- NULL until relayed
-  INDEX (created_at) WHERE published_at IS NULL
+  attempts       INT NOT NULL DEFAULT 0                -- V4: failed deliveries so far
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()   -- V4: due time; lease / backoff
+  last_error     TEXT                                  -- V4: latest failure, ≤1000 chars
+  failed_at      TIMESTAMPTZ                           -- V4: parked; never retried
+  INDEX (next_attempt_at, created_at) WHERE published_at IS NULL AND failed_at IS NULL
 ```
 
 #### REST API
@@ -241,7 +249,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.
