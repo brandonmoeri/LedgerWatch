@@ -7,10 +7,12 @@ import static org.mockito.Mockito.*;
 import com.ledgerwatch.accountservice.domain.Account;
 import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.domain.BalanceAdjustment;
+import com.ledgerwatch.accountservice.domain.ProcessedEvent;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
 import com.ledgerwatch.accountservice.repository.BalanceAdjustmentRepository;
+import com.ledgerwatch.accountservice.repository.ProcessedEventRepository;
 import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
 import java.time.Duration;
@@ -24,6 +26,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -38,6 +41,7 @@ public class AccountServiceTest {
 
   @Mock AccountRepository accountRepository;
   @Mock BalanceAdjustmentRepository adjustmentRepository;
+  @Mock ProcessedEventRepository processedEventRepository;
 
   AccountService accountService;
 
@@ -50,6 +54,7 @@ public class AccountServiceTest {
         new AccountService(
             accountRepository,
             adjustmentRepository,
+            processedEventRepository,
             TransactionOperations.withoutTransaction(),
             new BalanceRetryProperties(3, Duration.ZERO, Duration.ZERO));
     existingId = UUID.randomUUID();
@@ -411,5 +416,135 @@ public class AccountServiceTest {
     accountService.applyBalanceDelta(existingId, BigDecimal.TEN);
 
     verifyNoInteractions(adjustmentRepository);
+  }
+
+  // --- applyEventBalanceDelta ---
+
+  private static final String EVENT_TYPE = "TransactionCreated";
+
+  @Test
+  void applyEventBalanceDelta_recordsEventAndAdjustmentWithTheChange() {
+    UUID eventId = UUID.randomUUID();
+    UUID adjustmentId = UUID.randomUUID();
+    existing.setBalance(new BigDecimal("100.00"));
+    when(processedEventRepository.findById(eventId)).thenReturn(Optional.empty());
+    when(adjustmentRepository.findById(adjustmentId)).thenReturn(Optional.empty());
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+
+    boolean applied =
+        accountService.applyEventBalanceDelta(
+            eventId, EVENT_TYPE, existingId, new BigDecimal("-30"), adjustmentId);
+
+    assertThat(applied).isTrue();
+    assertThat(existing.getBalance()).isEqualByComparingTo("70.00");
+    verify(adjustmentRepository)
+        .saveAndFlush(
+            ArgumentMatchers.<BalanceAdjustment>argThat(a -> a.getId().equals(adjustmentId)));
+    verify(processedEventRepository)
+        .saveAndFlush(
+            ArgumentMatchers.<ProcessedEvent>argThat(
+                e -> e.getId().equals(eventId) && e.getEventType().equals(EVENT_TYPE)));
+  }
+
+  @Test
+  void applyEventBalanceDelta_skipsAlreadyProcessedEventWithoutTouchingAccount() {
+    UUID eventId = UUID.randomUUID();
+    when(processedEventRepository.findById(eventId))
+        .thenReturn(Optional.of(new ProcessedEvent(eventId, EVENT_TYPE)));
+
+    boolean applied =
+        accountService.applyEventBalanceDelta(
+            eventId, EVENT_TYPE, existingId, BigDecimal.TEN, UUID.randomUUID());
+
+    assertThat(applied).isFalse();
+    verifyNoInteractions(accountRepository, adjustmentRepository);
+    verify(processedEventRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void applyEventBalanceDelta_rejectsEventIdAlreadyProcessedAsDifferentType() {
+    UUID eventId = UUID.randomUUID();
+    when(processedEventRepository.findById(eventId))
+        .thenReturn(Optional.of(new ProcessedEvent(eventId, "SomethingElse")));
+
+    assertThatThrownBy(
+            () ->
+                accountService.applyEventBalanceDelta(
+                    eventId, EVENT_TYPE, existingId, BigDecimal.TEN, UUID.randomUUID()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining(eventId.toString());
+
+    verifyNoInteractions(accountRepository);
+  }
+
+  @Test
+  void applyEventBalanceDelta_recordsNewEventWhenAdjustmentWasAlreadyApplied() {
+    // The synchronous call applied the change under the transaction id; the first event delivery
+    // must replay it, not apply it again, and still mark the event processed.
+    UUID eventId = UUID.randomUUID();
+    UUID adjustmentId = UUID.randomUUID();
+    existing.setBalance(new BigDecimal("70.00"));
+    when(processedEventRepository.findById(eventId)).thenReturn(Optional.empty());
+    when(adjustmentRepository.findById(adjustmentId))
+        .thenReturn(
+            Optional.of(new BalanceAdjustment(adjustmentId, existingId, new BigDecimal("-30"))));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+    boolean applied =
+        accountService.applyEventBalanceDelta(
+            eventId, EVENT_TYPE, existingId, new BigDecimal("-30"), adjustmentId);
+
+    assertThat(applied).isTrue();
+    assertThat(existing.getBalance()).isEqualByComparingTo("70.00");
+    verify(accountRepository, never()).saveAndFlush(any());
+    verify(processedEventRepository).saveAndFlush(any());
+  }
+
+  @Test
+  void applyEventBalanceDelta_doesNotRecordEventWhenChangeIsRejected() {
+    UUID eventId = UUID.randomUUID();
+    existing.setBalance(new BigDecimal("5.00"));
+    when(processedEventRepository.findById(eventId)).thenReturn(Optional.empty());
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+    assertThatThrownBy(
+            () ->
+                accountService.applyEventBalanceDelta(
+                    eventId, EVENT_TYPE, existingId, new BigDecimal("-10"), null))
+        .isInstanceOf(InsufficientFundsException.class);
+
+    verify(processedEventRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void applyEventBalanceDelta_retriesWhenConcurrentDeliveryRecordedTheEventFirst() {
+    UUID eventId = UUID.randomUUID();
+    existing.setBalance(new BigDecimal("100.00"));
+    when(processedEventRepository.findById(eventId))
+        .thenReturn(Optional.empty())
+        .thenReturn(Optional.of(new ProcessedEvent(eventId, EVENT_TYPE)));
+    when(accountRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    when(accountRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
+    when(processedEventRepository.saveAndFlush(any()))
+        .thenThrow(new DataIntegrityViolationException("duplicate key"));
+
+    boolean applied =
+        accountService.applyEventBalanceDelta(
+            eventId, EVENT_TYPE, existingId, BigDecimal.TEN, null);
+
+    assertThat(applied).isFalse();
+    verify(processedEventRepository, times(2)).findById(eventId);
+  }
+
+  @Test
+  void applyEventBalanceDelta_rejectsZeroDelta() {
+    assertThatThrownBy(
+            () ->
+                accountService.applyEventBalanceDelta(
+                    UUID.randomUUID(), EVENT_TYPE, existingId, BigDecimal.ZERO, null))
+        .isInstanceOf(IllegalArgumentException.class);
+
+    verifyNoInteractions(processedEventRepository, accountRepository);
   }
 }

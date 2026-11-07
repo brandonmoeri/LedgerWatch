@@ -13,6 +13,7 @@ const mockTransaction: Transaction = {
     accountId: 'acc-1',
     type: 'CREDIT',
     status: 'POSTED',
+    rejectionReason: null,
     amount: '100.00',
     description: 'Paycheck',
     createdAt: '2024-01-15T10:00:00Z',
@@ -67,6 +68,7 @@ describe('TransactionsPage', () => {
             renderPage();
             expect(screen.getByLabelText(/^type$/i)).toBeInTheDocument();
             expect(screen.getByLabelText(/^status$/i)).toBeInTheDocument();
+            expect(screen.getByRole('option', { name: 'Rejected' })).toBeInTheDocument();
             expect(screen.getByLabelText(/^from$/i)).toBeInTheDocument();
             expect(screen.getByLabelText(/^to$/i)).toBeInTheDocument();
         });
@@ -121,6 +123,17 @@ describe('TransactionsPage', () => {
             expect(screen.getByText('POSTED')).toBeInTheDocument();
             expect(screen.getByText('100.00')).toBeInTheDocument();
             expect(screen.getByText('Paycheck')).toBeInTheDocument();
+        });
+
+        it('shows why a rejected transaction was rejected', () => {
+            renderPage({
+                status: 'succeeded',
+                items: [
+                    { ...mockTransaction, status: 'REJECTED', rejectionReason: 'INSUFFICIENT_FUNDS' },
+                ],
+            });
+            expect(screen.getByText('REJECTED')).toBeInTheDocument();
+            expect(screen.getByText('Insufficient funds')).toBeInTheDocument();
         });
     });
 

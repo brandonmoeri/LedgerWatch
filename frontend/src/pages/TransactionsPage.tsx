@@ -7,12 +7,17 @@ import type { Transaction, TransactionStatus, TransactionType } from '../types/t
 import DataTable from '../components/DataTable';
 import type { DataTableColumn, DataTableSort } from '../components/DataTable';
 import TransactionFilterForm from '../components/TransactionFilterForm';
+import TransactionStatusBadge from '../components/TransactionStatusBadge';
 import { useStableCallback } from '../hooks/useStableCallback';
 
 const COLUMNS: DataTableColumn<Transaction>[] = [
   { key: 'date', header: 'Date', render: (tx) => new Date(tx.createdAt).toLocaleDateString(), sortField: 'createdAt' },
   { key: 'type', header: 'Type', render: (tx) => tx.type },
-  { key: 'status', header: 'Status', render: (tx) => tx.status },
+  {
+    key: 'status',
+    header: 'Status',
+    render: (tx) => <TransactionStatusBadge status={tx.status} rejectionReason={tx.rejectionReason} />,
+  },
   { key: 'amount', header: 'Amount', render: (tx) => tx.amount, sortField: 'amount' },
   { key: 'description', header: 'Description', render: (tx) => tx.description },
 ];

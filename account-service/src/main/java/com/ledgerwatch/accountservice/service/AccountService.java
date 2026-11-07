@@ -3,11 +3,14 @@ package com.ledgerwatch.accountservice.service;
 import com.ledgerwatch.accountservice.domain.Account;
 import com.ledgerwatch.accountservice.domain.AccountStatus;
 import com.ledgerwatch.accountservice.domain.BalanceAdjustment;
+import com.ledgerwatch.accountservice.domain.ProcessedEvent;
 import com.ledgerwatch.accountservice.dto.CreateAccountRequest;
 import com.ledgerwatch.accountservice.dto.UpdateAccountRequest;
 import com.ledgerwatch.accountservice.repository.AccountRepository;
 import com.ledgerwatch.accountservice.repository.AccountSpecifications;
 import com.ledgerwatch.accountservice.repository.BalanceAdjustmentRepository;
+import com.ledgerwatch.accountservice.repository.ProcessedEventRepository;
+import com.ledgerwatch.common.error.AccountNotActiveException;
 import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
 import java.util.NoSuchElementException;
@@ -22,6 +25,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionCallback;
 import org.springframework.transaction.support.TransactionOperations;
 
 @Service
@@ -30,16 +34,19 @@ import org.springframework.transaction.support.TransactionOperations;
 public class AccountService {
   private final AccountRepository repo;
   private final BalanceAdjustmentRepository adjustmentRepo;
+  private final ProcessedEventRepository processedEventRepo;
   private final TransactionOperations tx;
   private final BalanceRetryProperties retry;
 
   public AccountService(
       AccountRepository repo,
       BalanceAdjustmentRepository adjustmentRepo,
+      ProcessedEventRepository processedEventRepo,
       TransactionOperations tx,
       BalanceRetryProperties retry) {
     this.repo = repo;
     this.adjustmentRepo = adjustmentRepo;
+    this.processedEventRepo = processedEventRepo;
     this.tx = tx;
     this.retry = retry;
   }
@@ -114,18 +121,76 @@ public class AccountService {
    */
   @Transactional(propagation = Propagation.NOT_SUPPORTED)
   public Account applyBalanceDelta(UUID id, BigDecimal delta, UUID adjustmentId) {
+    requireNonZero(delta);
+    return retryOnConflict(status -> applyBalanceDeltaOnce(id, delta, adjustmentId));
+  }
+
+  /**
+   * Applies the balance change carried by event {@code eventId}, at most once per event. The event
+   * id is recorded in {@code processed_events} in the same transaction as the change, so a
+   * redelivery finds the record and changes nothing. A failed attempt (insufficient funds, frozen
+   * account, ...) records nothing, so the event can be delivered again later.
+   *
+   * <p>The change itself still goes through {@link #applyBalanceDelta(UUID, BigDecimal, UUID)}'s
+   * {@code adjustmentId} check: the same change may already have been applied under that id by a
+   * synchronous call, and only the adjustment record knows that.
+   *
+   * <p>Concurrent deliveries of the same event serialize as for adjustments: the loser conflicts on
+   * the account version, the adjustment, or the processed-event primary key, and its retry finds
+   * the winner's record.
+   *
+   * @return true if the change was applied now; false if this event was already processed
+   * @throws IllegalStateException the event id was already processed as a different event type
+   */
+  @Transactional(propagation = Propagation.NOT_SUPPORTED)
+  public boolean applyEventBalanceDelta(
+      UUID eventId, String eventType, UUID accountId, BigDecimal delta, UUID adjustmentId) {
+    Objects.requireNonNull(eventId, "Event id must not be null");
+    Objects.requireNonNull(eventType, "Event type must not be null");
+    requireNonZero(delta);
+    return retryOnConflict(
+        status -> {
+          var processed = processedEventRepo.findById(eventId);
+          if (processed.isPresent()) {
+            if (!processed.get().getEventType().equals(eventType)) {
+              throw new IllegalStateException(
+                  "Event "
+                      + eventId
+                      + " was already processed as "
+                      + processed.get().getEventType());
+            }
+            return false;
+          }
+          applyBalanceDeltaOnce(accountId, delta, adjustmentId);
+          try {
+            processedEventRepo.saveAndFlush(new ProcessedEvent(eventId, eventType));
+          } catch (DataIntegrityViolationException e) {
+            // A concurrent delivery committed between our lookup and here; see the matching case
+            // in applyBalanceDeltaOnce.
+            throw new OptimisticLockingFailureException(
+                "Event " + eventId + " was processed concurrently", e);
+          }
+          return true;
+        });
+  }
+
+  private static void requireNonZero(BigDecimal delta) {
     Objects.requireNonNull(delta, "Delta must not be null");
     if (delta.signum() == 0) {
       throw new IllegalArgumentException("Delta must be non-zero");
     }
-    for (int attempt = 1; ; attempt++) {
+  }
+
+  /** Runs {@code attempt} in its own transaction, retrying optimistic-lock conflicts. */
+  private <T> T retryOnConflict(TransactionCallback<T> attempt) {
+    for (int n = 1; ; n++) {
       try {
-        return tx.execute(status -> applyBalanceDeltaOnce(id, delta, adjustmentId));
+        return tx.execute(attempt);
       } catch (OptimisticLockingFailureException e) {
-        if (attempt >= retry.maxAttempts()) {
+        if (n >= retry.maxAttempts()) {
           throw e;
         }
-        backOff(attempt, e);
+        backOff(n, e);
       }
     }
   }
@@ -139,8 +204,7 @@ public class AccountService {
     }
     Account account = getById(id);
     if (account.getStatus() != AccountStatus.ACTIVE) {
-      throw new IllegalStateException(
-          "Account is " + account.getStatus() + " and cannot accept balance changes: " + id);
+      throw new AccountNotActiveException(id, account.getStatus().name());
     }
     BigDecimal newBalance = account.getBalance().add(delta);
     // Only debits are checked, so a credit is accepted even if the balance is already negative.

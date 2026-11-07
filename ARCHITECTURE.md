@@ -154,23 +154,59 @@ accounts.account
 
 Key dependencies: same as account-service. It validates JWTs but does not issue them to users (no `/auth` endpoint). Tests add WireMock (`wiremock-standalone`).
 
+#### Transaction lifecycle
+
+`POST /transactions` doesn't touch the balance. It records the transaction as `PENDING`, writes its outbox event in the same DB transaction, and returns `202 Accepted`. The outbox publisher then applies the balance change and settles the status, so clients read the outcome with `GET /transactions/{id}`.
+
+```
+PENDING ──> POSTED ──> VOIDED     (VOIDED: PATCH by an ADMIN)
+   └──────> REJECTED
+```
+
+| Publisher outcome | Transaction | Outbox row |
+|---|---|---|
+| account-service accepts the change | `POSTED` | `published_at` set |
+| `404` no such account | `REJECTED`, `ACCOUNT_NOT_FOUND` | parked |
+| `409` with type `urn:ledgerwatch:problem:account-not-active` | `REJECTED`, `ACCOUNT_NOT_ACTIVE` | parked |
+| `422` insufficient funds | `REJECTED`, `INSUFFICIENT_FUNDS` | parked |
+| Any other `409`, such as optimistic-lock retries exhausted in account-service | stays `PENDING` | backoff |
+| Timeout, connection failure, `5xx`, circuit breaker | stays `PENDING` | backoff, or released untouched if the breaker refused the call |
+| Auth failure, other `4xx`, unusable event | stays `PENDING` | parked; needs an operator |
+
+- **Only business answers reject.** A failure that says nothing about the transaction, such as a bad service token, never produces `REJECTED`. The balance wasn't changed, so the transaction stays `PENDING` until the cause is fixed and the event retried.
+- **`REJECTED` and `VOIDED` are terminal.** `PATCH` can change a `description` on `PENDING` or `POSTED` transactions, and its only status change is `POSTED` → `VOIDED`. A `PENDING` transaction can't be voided, because its balance change may already be in flight. Voiding doesn't reverse the balance.
+- **Settling is atomic and conditional.** The status and the outbox row change in one local DB transaction, and the update only applies `WHERE status = 'PENDING'`, so a redelivery can't overwrite a later status. `Transaction` uses `@DynamicUpdate`, so a concurrent `PATCH` of the description can't overwrite a settled status.
+- **Crash window:** if the publisher dies after account-service applied the change but before the local commit, the lease expires, the event is redelivered, the adjustment replays as a no-op, and the transaction posts.
+- **Dashboard:** `/transactions/summary` counts `POSTED` only, so pending and rejected transactions don't appear in it.
+
 #### Calls to account-service
 
-`POST /transactions` applies the transaction to the account balance through account-service's `POST /internal/accounts/{id}/balance-adjustments` (CREDIT → `+amount`, DEBIT → `-amount`).
+`OutboxPublisher` applies each transaction through account-service's `POST /internal/accounts/{id}/balance-adjustments` (CREDIT → `+amount`, DEBIT → `-amount`).
 
 - **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
-- **Ordering:** in one local DB transaction, the row is inserted and flushed, then account-service is called. Any failure from that call rolls back the insert.
-- **Error mapping:** account-service `404` → `404`; `409` (frozen/closed account, or optimistic-lock retries exhausted inside account-service) → `409`, with no further retry here; `422` → `InsufficientFundsException` → `422` with the same insufficient-funds problem type; timeouts, connection failures, `5xx` and any other error status → `502 Bad Gateway`.
-- **Known gap:** if account-service applies the delta but the response is lost (read timeout) or the local commit then fails, the balance changes without a stored transaction. The client-facing `Idempotency-Key` (below) does not cover this: the failed attempt is rolled back, so a retry applies the delta again. Closing that gap needs an idempotency key on the internal endpoint, or an outbox.
+- **Telling 409s apart:** account-service reports a FROZEN or CLOSED account as `AccountNotActiveException`, with the problem type `urn:ledgerwatch:problem:account-not-active`. Every other `409` becomes `AccountServiceConflictException`, which is worth retrying later. It doesn't count against the circuit breaker, because account-service is healthy.
+
+#### Transactional outbox
+
+Each created transaction also writes one row to `outbox_event` in the same local DB transaction, so an event exists only if its transaction committed. Idempotent replays write no new event.
+
+- **Event:** `aggregate_type = 'Transaction'`, `aggregate_id` = the transaction id, `event_type = 'TransactionCreated'`. The `payload` (JSONB) holds `transactionId`, `accountId`, `type`, `amount`, `description` and `createdAt`.
+- **Delivery:** `OutboxPublisher` polls on a `@Scheduled` fixed delay. Each poll claims up to `batch-size` due rows (`published_at` and `failed_at` null, `next_attempt_at <= now`, oldest first) with `FOR UPDATE SKIP LOCKED` in a short transaction, so concurrent instances split the queue. The claim leases each row by moving `next_attempt_at` forward by `lease`. Rows are then delivered one at a time outside any DB transaction. If an instance dies mid-batch, its leases expire and another poll picks the rows up again.
+- **What delivery means:** a `TransactionCreated` event becomes a `POST /internal/accounts/{id}/balance-adjustments` with `adjustmentId` = the transaction id (not the event id). This is the only place a balance is applied. account-service applies each adjustment id at most once, so at-least-once redelivery is safe. account-service also has `POST /internal/events`, which the publisher doesn't use yet.
+- **Outcomes:** success sets `published_at`. `AccountServiceUnavailableException` (I/O, timeout or 5xx, after the client's own retries) and `AccountServiceConflictException` increment `attempts`, record `last_error`, and back the row off exponentially: `initial-backoff * 2^(attempts-1)`, capped at `max-backoff`, with no limit on attempts. Any other failure parks the row with `failed_at`. See [Transaction lifecycle](#transaction-lifecycle) for what each outcome does to the transaction.
+- **Retrying a parked row:** parked rows are never retried automatically. To retry one whose transaction is still `PENDING`, set `failed_at` back to null. Don't do this for a `REJECTED` transaction: the balance change could apply while the status stays `REJECTED`.
+- **Circuit breaker:** the publisher shares the `accountService` breaker with `POST /transactions`. While it is open, polls are skipped. If it trips mid-batch, the rest of the batch is released (`next_attempt_at = now`, `attempts` unchanged).
+- **Configuration** (`outbox.publisher.*`): `enabled` (`OUTBOX_PUBLISHER_ENABLED`, default `true`; the `test` profile sets `false` and tests call `publishPending()` directly), `poll-interval` (`OUTBOX_PUBLISHER_POLL_INTERVAL`, default `1s`), `batch-size` (`50`), `lease` (`2m`; keep it longer than a batch's worst-case delivery time, or a slow batch is delivered twice, which is harmless), `initial-backoff` (`1s`), `max-backoff` (`5m`).
+- `PATCH` updates don't emit events yet.
 
 #### Idempotent creates
 
 `POST /transactions` accepts an optional `Idempotency-Key` header (1–255 characters; clients typically send a UUID per logical request).
 
 - **Scope:** keys are per caller (the JWT `sub`), enforced by `UNIQUE (caller, idempotency_key)` on `idempotency_record`.
-- **Claim first:** the request inserts its key row with `INSERT … ON CONFLICT DO NOTHING` before inserting the transaction or calling account-service, all in one DB transaction. A concurrent duplicate waits on the unique index. If the first request commits, the duplicate replays its response. If it rolls back, the duplicate goes ahead as a new request.
-- **Replay:** a repeat with the same key and the same request (a SHA-256 over `accountId`, `type`, the normalized `amount` and `description`) returns the original 201 body, as stored, with an `Idempotent-Replayed: true` header. Later `PATCH`es don't change that body. No new row is inserted and the balance is not adjusted again.
+- **Claim first:** the request inserts its key row with `INSERT … ON CONFLICT DO NOTHING` before inserting the transaction, all in one DB transaction. A concurrent duplicate waits on the unique index. If the first request commits, the duplicate replays its response. If it rolls back, the duplicate goes ahead as a new request.
+- **Replay:** a repeat with the same key and the same request (a SHA-256 over `accountId`, `type`, the normalized `amount` and `description`) returns the original 202 body, as stored, with an `Idempotent-Replayed: true` header. That body keeps the `PENDING` status from creation time, and later `PATCH`es don't change it either, so read the current status with `GET /transactions/{id}`. No new row or event is inserted.
 - **Mismatch:** the same key with a different request returns `422`.
 - **Failures aren't recorded:** any error rolls back the claim, so the client can retry with the same key. Keys never expire yet.
 - Without the header, every request creates a new transaction, as before.
@@ -182,7 +218,8 @@ transactions.transaction
   id          UUID PK  DEFAULT gen_random_uuid()
   account_id  UUID NOT NULL   -- FK by convention; no DB constraint
   type        VARCHAR(10) NOT NULL        -- CREDIT | DEBIT
-  status      VARCHAR(10) NOT NULL DEFAULT 'POSTED'   -- POSTED | VOIDED
+  status      VARCHAR(10) NOT NULL DEFAULT 'PENDING'  -- PENDING | POSTED | REJECTED | VOIDED
+  rejection_reason VARCHAR(32)                        -- V5: set when REJECTED
   amount      NUMERIC(19,4) NOT NULL
   description VARCHAR(255)
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -197,6 +234,20 @@ transactions.idempotency_record                       -- V2
   response_body   TEXT                                 -- original 201 body (JSON)
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
   UNIQUE (caller, idempotency_key)
+
+transactions.outbox_event                             -- V3
+  id             UUID PK  DEFAULT gen_random_uuid()    -- event id; consumers de-dupe on it
+  aggregate_type VARCHAR(64) NOT NULL                  -- 'Transaction'
+  aggregate_id   UUID NOT NULL                         -- transaction id; no FK
+  event_type     VARCHAR(64) NOT NULL                  -- 'TransactionCreated'
+  payload        JSONB NOT NULL
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  published_at   TIMESTAMPTZ                           -- NULL until relayed
+  attempts       INT NOT NULL DEFAULT 0                -- V4: failed deliveries so far
+  next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()   -- V4: due time; lease / backoff
+  last_error     TEXT                                  -- V4: latest failure, ≤1000 chars
+  failed_at      TIMESTAMPTZ                           -- V4: parked; never retried
+  INDEX (next_attempt_at, created_at) WHERE published_at IS NULL AND failed_at IS NULL
 ```
 
 #### REST API
@@ -206,8 +257,8 @@ transactions.idempotency_record                       -- V2
 | `GET` | `/transactions` | Any role | List transactions |
 | `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
-| `POST` | `/transactions` | `ADMIN` | Create (`accountId`, `type`, `amount` ≤4 dp, optional `description`) and adjust the account balance; 404/409 from account-service pass through; a DEBIT larger than the balance is 422 (`type: urn:ledgerwatch:problem:insufficient-funds`); 502 if account-service is unavailable. Optional `Idempotency-Key` header: replays the original 201, 422 (default `about:blank` type) if reused with a different body |
-| `PATCH` | `/transactions/{id}` | `ADMIN` | Update `status` and/or `description` |
+| `POST` | `/transactions` | `ADMIN` | Accept (`accountId`, `type`, `amount` ≤4 dp, optional `description`): `202` with status `PENDING`. The outcome arrives later as `POSTED` or `REJECTED` with a `rejectionReason`; see [Transaction lifecycle](#transaction-lifecycle). Optional `Idempotency-Key` header: replays the original 202, 422 if reused with a different body |
+| `PATCH` | `/transactions/{id}` | `ADMIN` | Update `description`, or void a `POSTED` transaction with `status: VOIDED`. 409 for any other status change, or if the transaction is `VOIDED` or `REJECTED` |
 
 ---
 
@@ -223,7 +274,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.

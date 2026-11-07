@@ -37,6 +37,21 @@ class AbstractApiExceptionHandlerTest {
   }
 
   @Test
+  void accountNotActive_mapsTo409WithTypedProblem() {
+    UUID accountId = UUID.randomUUID();
+
+    ProblemDetail problem =
+        handler.handleAccountNotActive(new AccountNotActiveException(accountId, "FROZEN"));
+
+    assertThat(problem.getStatus()).isEqualTo(HttpStatus.CONFLICT.value());
+    assertThat(problem.getType()).isEqualTo(AccountNotActiveException.TYPE);
+    assertThat(problem.getTitle()).isEqualTo("Account not active");
+    assertThat(problem.getProperties())
+        .containsEntry("accountId", accountId)
+        .containsEntry("accountStatus", "FROZEN");
+  }
+
+  @Test
   void notFound_mapsTo404() {
     ProblemDetail problem = handler.handleNotFound(new NoSuchElementException("gone"));
 

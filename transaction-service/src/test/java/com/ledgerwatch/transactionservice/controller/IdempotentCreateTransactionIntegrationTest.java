@@ -1,12 +1,6 @@
 package com.ledgerwatch.transactionservice.controller;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doThrow;
-import static org.mockito.Mockito.reset;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -15,10 +9,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
-import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
 import com.ledgerwatch.transactionservice.repository.IdempotencyRecordRepository;
+import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import java.math.BigDecimal;
 import java.util.List;
@@ -32,7 +26,6 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -52,12 +45,12 @@ class IdempotentCreateTransactionIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
   @Autowired IdempotencyRecordRepository idempotencyRecordRepository;
-
-  @MockBean AccountServiceClient accountServiceClient;
+  @Autowired OutboxEventRepository outboxEventRepository;
 
   @AfterEach
   void cleanUp() {
     idempotencyRecordRepository.deleteAll();
+    outboxEventRepository.deleteAll();
     transactionRepository.deleteAll();
   }
 
@@ -87,25 +80,24 @@ class IdempotentCreateTransactionIntegrationTest {
   }
 
   @Test
-  void sameKeySameRequest_replaysOriginalResponse_withoutSecondInsertOrBalanceCall()
-      throws Exception {
+  void sameKeySameRequest_replaysOriginalResponse_withoutSecondInsertOrEvent() throws Exception {
     var request = credit("25.00", "refund");
     String key = UUID.randomUUID().toString();
 
     MvcResult first =
         create("admin", key, request)
-            .andExpect(status().isCreated())
+            .andExpect(status().isAccepted())
             .andExpect(header().doesNotExist("Idempotent-Replayed"))
             .andReturn();
     MvcResult second =
         create("admin", key, request)
-            .andExpect(status().isCreated())
+            .andExpect(status().isAccepted())
             .andExpect(header().string("Idempotent-Replayed", "true"))
             .andReturn();
 
     assertThat(body(second)).isEqualTo(body(first));
     assertThat(transactionRepository.count()).isEqualTo(1);
-    verify(accountServiceClient, times(1)).applyBalanceDelta(any(), any(), any());
+    assertThat(outboxEventRepository.count()).isEqualTo(1);
   }
 
   @Test
@@ -123,14 +115,14 @@ class IdempotentCreateTransactionIntegrationTest {
         .andExpect(status().isOk());
 
     create("admin", key, request)
-        .andExpect(status().isCreated())
+        .andExpect(status().isAccepted())
         .andExpect(jsonPath("$.description").value("original memo"));
   }
 
   @Test
   void sameKeyDifferentRequest_returns422() throws Exception {
     String key = UUID.randomUUID().toString();
-    create("admin", key, credit("25.00", null)).andExpect(status().isCreated());
+    create("admin", key, credit("25.00", null)).andExpect(status().isAccepted());
 
     create("admin", key, credit("99.00", null))
         .andExpect(status().isUnprocessableEntity())
@@ -151,36 +143,9 @@ class IdempotentCreateTransactionIntegrationTest {
   }
 
   @Test
-  void failedAttempt_isNotRecorded_soRetryWithSameKeySucceeds() throws Exception {
+  void concurrentDuplicates_createOneTransaction_andOneEvent() throws Exception {
     var request = credit("25.00", null);
     String key = UUID.randomUUID().toString();
-    doThrow(new IllegalStateException("Account is frozen"))
-        .when(accountServiceClient)
-        .applyBalanceDelta(any(), any(), any());
-
-    create("admin", key, request).andExpect(status().isConflict());
-    assertThat(idempotencyRecordRepository.count()).isZero();
-
-    reset(accountServiceClient);
-    create("admin", key, request)
-        .andExpect(status().isCreated())
-        .andExpect(header().doesNotExist("Idempotent-Replayed"));
-    assertThat(transactionRepository.count()).isEqualTo(1);
-  }
-
-  @Test
-  void concurrentDuplicates_createOneTransaction_andAdjustBalanceOnce() throws Exception {
-    var request = credit("25.00", null);
-    String key = UUID.randomUUID().toString();
-    // Hold the first request's DB transaction open so the second arrives while the claim is
-    // uncommitted and has to wait on the unique constraint.
-    doAnswer(
-            inv -> {
-              Thread.sleep(500);
-              return null;
-            })
-        .when(accountServiceClient)
-        .applyBalanceDelta(any(), any(), any());
 
     Callable<MvcResult> call = () -> create("admin", key, request).andReturn();
     ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -190,7 +155,7 @@ class IdempotentCreateTransactionIntegrationTest {
       MvcResult b = futures.get(1).get();
 
       assertThat(List.of(a.getResponse().getStatus(), b.getResponse().getStatus()))
-          .containsOnly(201);
+          .containsOnly(202);
       assertThat(body(a)).isEqualTo(body(b));
       assertThat(
               List.of(
@@ -201,7 +166,7 @@ class IdempotentCreateTransactionIntegrationTest {
       pool.shutdownNow();
     }
     assertThat(transactionRepository.count()).isEqualTo(1);
-    verify(accountServiceClient, times(1)).applyBalanceDelta(any(), any(), any());
+    assertThat(outboxEventRepository.count()).isEqualTo(1);
   }
 
   @Test
@@ -214,8 +179,8 @@ class IdempotentCreateTransactionIntegrationTest {
   void noKey_stillCreatesEachTime() throws Exception {
     var request = credit("25.00", null);
 
-    create("admin", null, request).andExpect(status().isCreated());
-    create("admin", null, request).andExpect(status().isCreated());
+    create("admin", null, request).andExpect(status().isAccepted());
+    create("admin", null, request).andExpect(status().isAccepted());
 
     assertThat(transactionRepository.count()).isEqualTo(2);
     assertThat(idempotencyRecordRepository.count()).isZero();

@@ -47,7 +47,7 @@ class RoleAuthorizationIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
 
-  // Balance propagation is covered by CreateTransactionAccountServiceIntegrationTest.
+  // Posting is covered by TransactionPostingIntegrationTest.
   @MockBean AccountServiceClient accountServiceClient;
 
   @Value("${jwt.secret}")
@@ -144,7 +144,7 @@ class RoleAuthorizationIntegrationTest {
   }
 
   @Test
-  void adminRole_postTransactions_returns201() throws Exception {
+  void adminRole_postTransactions_returns202() throws Exception {
     var body =
         objectMapper.writeValueAsString(
             new CreateTransactionRequest(
@@ -156,7 +156,7 @@ class RoleAuthorizationIntegrationTest {
                 .header("Authorization", "Bearer " + mintToken(List.of("ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body))
-        .andExpect(status().isCreated());
+        .andExpect(status().isAccepted());
   }
 
   @Test

@@ -1,5 +1,9 @@
 package com.ledgerwatch.transactionservice.controller;
 
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.reset;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -7,12 +11,17 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
+import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
 import com.ledgerwatch.transactionservice.dto.UpdateTransactionRequest;
+import com.ledgerwatch.transactionservice.event.OutboxPublisher;
+import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.NoSuchElementException;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -25,6 +34,10 @@ import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.ResultActions;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -36,13 +49,33 @@ class TransactionControllerIntegrationTest {
   @Autowired MockMvc mockMvc;
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
+  @Autowired OutboxEventRepository outboxEventRepository;
+  @Autowired OutboxPublisher publisher;
+  @Autowired PlatformTransactionManager transactionManager;
 
-  // Balance propagation is covered by CreateTransactionAccountServiceIntegrationTest.
+  // Stubbed to accept every balance change. Failures are covered by
+  // TransactionPostingIntegrationTest.
   @MockBean AccountServiceClient accountServiceClient;
 
   @AfterEach
   void cleanUp() {
+    outboxEventRepository.deleteAll();
     transactionRepository.deleteAll();
+  }
+
+  private String createPostedTransaction() throws Exception {
+    var id = createTransaction();
+    publisher.publishPending();
+    return id;
+  }
+
+  private ResultActions patchTransaction(String id, UpdateTransactionRequest request)
+      throws Exception {
+    return mockMvc.perform(
+        patch("/transactions/{id}", id)
+            .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
+            .contentType(MediaType.APPLICATION_JSON)
+            .content(objectMapper.writeValueAsString(request)));
   }
 
   private String createTransaction() throws Exception {
@@ -90,7 +123,7 @@ class TransactionControllerIntegrationTest {
 
   @Test
   void updateTransaction_validStatus_returns200() throws Exception {
-    var id = createTransaction();
+    var id = createPostedTransaction();
     var body =
         objectMapper.writeValueAsString(
             new UpdateTransactionRequest(TransactionStatus.VOIDED, "cancelled"));
@@ -136,6 +169,9 @@ class TransactionControllerIntegrationTest {
     // different account: must not affect the filtered summary
     createTransaction(
         UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("999.00"), "other account");
+    publisher.publishPending();
+    // pending: must not count until it posts
+    createTransaction(accountId, TransactionType.CREDIT, new BigDecimal("7.00"), "in flight");
 
     mockMvc
         .perform(get("/transactions/summary").with(jwt()).param("accountId", accountId.toString()))
@@ -147,7 +183,7 @@ class TransactionControllerIntegrationTest {
 
   @Test
   void updateTransaction_alreadyVoided_returns409() throws Exception {
-    var id = createTransaction();
+    var id = createPostedTransaction();
     var void1 =
         objectMapper.writeValueAsString(
             new UpdateTransactionRequest(TransactionStatus.VOIDED, null));
@@ -170,5 +206,60 @@ class TransactionControllerIntegrationTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(void2))
         .andExpect(status().isConflict());
+  }
+
+  @Test
+  void updateTransaction_cannotSettleOrVoidAPendingTransaction() throws Exception {
+    var id = createTransaction();
+
+    patchTransaction(id, new UpdateTransactionRequest(TransactionStatus.POSTED, null))
+        .andExpect(status().isConflict());
+    patchTransaction(id, new UpdateTransactionRequest(TransactionStatus.REJECTED, null))
+        .andExpect(status().isConflict());
+    patchTransaction(id, new UpdateTransactionRequest(TransactionStatus.VOIDED, null))
+        .andExpect(status().isConflict());
+
+    patchTransaction(id, new UpdateTransactionRequest(null, "memo"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("PENDING"))
+        .andExpect(jsonPath("$.description").value("memo"));
+  }
+
+  @Test
+  void updateTransaction_rejected_returns409() throws Exception {
+    var id = createTransaction();
+    doThrow(new NoSuchElementException("Account not found"))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any(), any());
+    publisher.publishPending();
+    reset(accountServiceClient);
+
+    patchTransaction(id, new UpdateTransactionRequest(null, "memo"))
+        .andExpect(status().isConflict());
+  }
+
+  @Test
+  void descriptionEdit_racingWithSettlement_keepsTheSettledStatus() {
+    var tx = new Transaction();
+    tx.setAccountId(UUID.randomUUID());
+    tx.setType(TransactionType.CREDIT);
+    tx.setAmount(new BigDecimal("10.00"));
+    UUID id = transactionRepository.save(tx).getId();
+    var outer = new TransactionTemplate(transactionManager);
+    var publisherTransaction = new TransactionTemplate(transactionManager);
+    publisherTransaction.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+    // The PATCH reads the row as PENDING, then the publisher commits POSTED before the PATCH does.
+    outer.executeWithoutResult(
+        status -> {
+          var editing = transactionRepository.findById(id).orElseThrow();
+          publisherTransaction.executeWithoutResult(
+              inner -> transactionRepository.markPosted(id, Instant.now()));
+          editing.setDescription("edited");
+        });
+
+    var saved = transactionRepository.findById(id).orElseThrow();
+    assertThat(saved.getStatus()).isEqualTo(TransactionStatus.POSTED);
+    assertThat(saved.getDescription()).isEqualTo("edited");
   }
 }

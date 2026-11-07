@@ -1,5 +1,8 @@
 package com.ledgerwatch.transactionservice.client;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ledgerwatch.common.error.AccountNotActiveException;
 import com.ledgerwatch.common.error.InsufficientFundsException;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
@@ -29,12 +32,18 @@ import org.springframework.web.client.RestClient;
 @EnableConfigurationProperties(AccountServiceProperties.class)
 public class AccountServiceClient {
 
+  /** Name of the resilience4j retry and circuit-breaker instances wrapping these calls. */
+  public static final String RESILIENCE_INSTANCE = "accountService";
+
   private final RestClient restClient;
+  private final ObjectMapper objectMapper;
 
   public AccountServiceClient(
       RestClient.Builder builder,
       AccountServiceProperties properties,
-      ServiceTokenProvider tokenProvider) {
+      ServiceTokenProvider tokenProvider,
+      ObjectMapper objectMapper) {
+    this.objectMapper = objectMapper;
     HttpClient httpClient =
         HttpClient.newBuilder()
             .connectTimeout(properties.connectTimeout())
@@ -61,15 +70,17 @@ public class AccountServiceClient {
    * adjustmentId} at most once, which is what makes retrying a timed-out or 5xx call safe.
    *
    * @throws NoSuchElementException the account does not exist
-   * @throws IllegalStateException the account is FROZEN/CLOSED or was modified concurrently
+   * @throws AccountNotActiveException the account is FROZEN or CLOSED
+   * @throws AccountServiceConflictException any other 409, such as a concurrent modification that
+   *     outlasted account-service's own retries
    * @throws InsufficientFundsException a debit would take the balance below zero
    * @throws AccountServiceUnavailableException account-service is unreachable, timed out, or
    *     returned 5xx on every attempt
    * @throws AccountServiceException account-service returned another unexpected status
    * @throws CallNotPermittedException the circuit breaker is open; no request was sent
    */
-  @Retry(name = "accountService")
-  @CircuitBreaker(name = "accountService")
+  @Retry(name = RESILIENCE_INSTANCE)
+  @CircuitBreaker(name = RESILIENCE_INSTANCE)
   public void applyBalanceDelta(UUID accountId, BigDecimal delta, UUID adjustmentId) {
     try {
       restClient
@@ -86,11 +97,14 @@ public class AccountServiceClient {
           .onStatus(
               status -> status.isSameCodeAs(HttpStatus.CONFLICT),
               (request, response) -> {
-                throw new IllegalStateException(
-                    "Account "
-                        + accountId
-                        + " rejected the balance change (frozen, closed, or modified"
-                        + " concurrently)");
+                JsonNode problem = objectMapper.readTree(response.getBody());
+                String type = problem.path("type").asText();
+                if (AccountNotActiveException.TYPE.toString().equals(type)) {
+                  throw new AccountNotActiveException(
+                      accountId, problem.path("accountStatus").asText());
+                }
+                throw new AccountServiceConflictException(
+                    "account-service returned 409: " + problem.path("detail").asText());
               })
           .onStatus(
               // The internal endpoint returns 422 only for insufficient funds.

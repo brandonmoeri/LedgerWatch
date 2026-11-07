@@ -27,6 +27,16 @@ account-service:
   connect-timeout: ${ACCOUNT_SERVICE_CONNECT_TIMEOUT:2s}
   read-timeout: ${ACCOUNT_SERVICE_READ_TIMEOUT:5s}
 
+# Relays outbox_event rows to account-service (see OutboxPublisher).
+outbox:
+  publisher:
+    enabled: ${OUTBOX_PUBLISHER_ENABLED:true}
+    poll-interval: ${OUTBOX_PUBLISHER_POLL_INTERVAL:1s}
+    batch-size: 50
+    lease: 2m                 # > a batch's worst-case delivery time, or it may be sent twice
+    initial-backoff: 1s       # 1s, 2s, 4s ... per event after each transient failure
+    max-backoff: 5m
+
 # Resilience for AccountServiceClient. Only AccountServiceUnavailableException (I/O failure,
 # timeout, 5xx) is retried or counted by the breaker; 4xx answers are final. Retries are safe
 # because account-service applies each adjustment id (the transaction id) at most once.

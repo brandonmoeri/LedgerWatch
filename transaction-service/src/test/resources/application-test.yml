@@ -2,3 +2,7 @@
 # (see TestcontainersConfiguration) — do not hardcode spring.datasource here.
 jwt:
   secret: "test-secret-that-is-exactly-32b!!"
+# Tests drive OutboxPublisher directly; a background poll would race their assertions.
+outbox:
+  publisher:
+    enabled: false

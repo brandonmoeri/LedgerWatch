@@ -202,6 +202,8 @@ public class InternalAccountControllerIntegrationTest {
 
     adjust(id, "{\"delta\": 10}", SERVICE)
         .andExpect(status().isConflict())
+        .andExpect(jsonPath("$.type").value("urn:ledgerwatch:problem:account-not-active"))
+        .andExpect(jsonPath("$.accountStatus").value("FROZEN"))
         .andExpect(jsonPath("$.detail").value(containsString("FROZEN")));
 
     assertThat(balanceOf(id)).isEqualByComparingTo("100.00");

@@ -107,6 +107,46 @@
   font-size: 1rem;
 }
 
+.status-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.status-badge--pending {
+  background: #fff4d6;
+  border-color: #e0b84c;
+  color: #6b4e00;
+}
+
+.status-badge--posted {
+  background: #e3f4e6;
+  border-color: #6dbb7c;
+  color: #1c5a2a;
+}
+
+.status-badge--rejected {
+  background: #fdecea;
+  border-color: #d33;
+  color: #611a15;
+}
+
+.status-badge--voided {
+  background: #ececea;
+  border-color: #a9a8a2;
+  color: #454441;
+}
+
+.status-reason {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: 0.8rem;
+}
+
 .viz-tooltip {
   background: #fcfcfb;
   border: 1px solid #e1e0d9;
