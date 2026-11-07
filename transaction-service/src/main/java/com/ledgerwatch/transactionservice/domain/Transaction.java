@@ -4,8 +4,14 @@ import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
+import org.hibernate.annotations.DynamicUpdate;
 
+/**
+ * Starts PENDING and is settled to POSTED or REJECTED by the outbox publisher. Updates write only
+ * changed columns, so a PATCH of the description can't overwrite a status settled while it ran.
+ */
 @Entity
+@DynamicUpdate
 public class Transaction {
 
   @Id
@@ -21,7 +27,11 @@ public class Transaction {
 
   @Enumerated(EnumType.STRING)
   @Column(nullable = false, length = 10)
-  private TransactionStatus status = TransactionStatus.POSTED;
+  private TransactionStatus status = TransactionStatus.PENDING;
+
+  @Enumerated(EnumType.STRING)
+  @Column(name = "rejection_reason", length = 32)
+  private TransactionRejectionReason rejectionReason;
 
   @Column(nullable = false, precision = 19, scale = 4)
   private BigDecimal amount;
@@ -66,6 +76,10 @@ public class Transaction {
 
   public void setStatus(TransactionStatus status) {
     this.status = status;
+  }
+
+  public TransactionRejectionReason getRejectionReason() {
+    return rejectionReason;
   }
 
   public BigDecimal getAmount() {

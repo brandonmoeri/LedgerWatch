@@ -62,6 +62,7 @@ export default function TransactionFilterForm({
           <option value="">All</option>
           <option value="PENDING">Pending</option>
           <option value="POSTED">Posted</option>
+          <option value="REJECTED">Rejected</option>
           <option value="VOIDED">Voided</option>
         </select>
       </label>

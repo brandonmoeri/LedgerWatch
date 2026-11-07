@@ -37,7 +37,7 @@ class CreateTransactionIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
 
-  // Balance propagation is covered by CreateTransactionAccountServiceIntegrationTest.
+  // Posting is covered by TransactionPostingIntegrationTest.
   @MockBean AccountServiceClient accountServiceClient;
   @Autowired Flyway flyway;
 
@@ -56,7 +56,7 @@ class CreateTransactionIntegrationTest {
   }
 
   @Test
-  void createTransaction_validRequest_returns201WithBody() throws Exception {
+  void createTransaction_validRequest_returns202WithPendingBody() throws Exception {
     var request =
         new CreateTransactionRequest(
             UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("250.00"), "salary");
@@ -67,11 +67,11 @@ class CreateTransactionIntegrationTest {
                 .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
-        .andExpect(status().isCreated())
+        .andExpect(status().isAccepted())
         .andExpect(jsonPath("$.id").isNotEmpty())
         .andExpect(jsonPath("$.type").value("CREDIT"))
         .andExpect(jsonPath("$.amount").value(250.00))
-        .andExpect(jsonPath("$.status").value("POSTED"));
+        .andExpect(jsonPath("$.status").value("PENDING"));
   }
 
   @Test

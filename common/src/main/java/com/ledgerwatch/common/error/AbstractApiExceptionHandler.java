@@ -26,6 +26,17 @@ public abstract class AbstractApiExceptionHandler {
     return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
   }
 
+  @ExceptionHandler(AccountNotActiveException.class)
+  public ProblemDetail handleAccountNotActive(AccountNotActiveException ex) {
+    ProblemDetail problemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+    problemDetail.setType(AccountNotActiveException.TYPE);
+    problemDetail.setTitle("Account not active");
+    problemDetail.setProperty("accountId", ex.getAccountId());
+    problemDetail.setProperty("accountStatus", ex.getAccountStatus());
+    return problemDetail;
+  }
+
   @ExceptionHandler(InsufficientFundsException.class)
   public ProblemDetail handleInsufficientFunds(InsufficientFundsException ex) {
     ProblemDetail problemDetail =

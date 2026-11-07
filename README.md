@@ -72,10 +72,10 @@ Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 |---|---|---|
 | `GET` | `/transactions` | List all transactions |
 | `GET` | `/transactions/{id}` | Fetch transaction by UUID |
-| `POST` | `/transactions` | Post transaction (`accountId`, `type`, `amount`, optional `description`); send an `Idempotency-Key` header to make retries safe |
-| `PATCH` | `/transactions/{id}` | Update `status` and/or `description` |
+| `POST` | `/transactions` | Accept a transaction (`accountId`, `type`, `amount`, optional `description`) and return `202` with status `PENDING`; send an `Idempotency-Key` header to make retries safe |
+| `PATCH` | `/transactions/{id}` | Update `description`, or void a `POSTED` transaction |
 
-Transaction types: `CREDIT`, `DEBIT`. Statuses: `POSTED`, `VOIDED`.
+Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`, `VOIDED`. The balance is applied asynchronously: poll `GET /transactions/{id}` until the status is `POSTED` or `REJECTED`, which comes with a `rejectionReason` (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE` or `INSUFFICIENT_FUNDS`).
 
 ## AWS deployment (`account-service`)
 

@@ -1,12 +1,18 @@
 export type TransactionType = 'CREDIT' | 'DEBIT';
 
-export type TransactionStatus = 'PENDING' | 'POSTED' | 'VOIDED';
+export type TransactionStatus = 'PENDING' | 'POSTED' | 'REJECTED' | 'VOIDED';
+
+export type TransactionRejectionReason =
+    | 'ACCOUNT_NOT_FOUND'
+    | 'ACCOUNT_NOT_ACTIVE'
+    | 'INSUFFICIENT_FUNDS';
 
 export interface Transaction {
     id: string;
     accountId: string;
     type: TransactionType;
     status: TransactionStatus;
+    rejectionReason: TransactionRejectionReason | null;
     amount: string;
     description: string | null;
     createdAt: string;

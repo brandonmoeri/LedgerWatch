@@ -15,10 +15,13 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
+import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.dto.CreateTransactionRequest;
+import com.ledgerwatch.transactionservice.event.OutboxPublisher;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
@@ -45,15 +48,16 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders;
 
 /**
- * Exercises the real {@code AccountServiceClient} (RestClient, timeouts, service JWT, retry and
- * circuit breaker) against a WireMock stand-in for account-service's balance-adjustment endpoint.
+ * Follows a transaction from {@code POST /transactions} to its final status: the real {@code
+ * AccountServiceClient} (RestClient, timeouts, service JWT, retry and circuit breaker) and {@code
+ * OutboxPublisher} against a WireMock stand-in for account-service's balance-adjustment endpoint.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
 @ActiveProfiles("test")
 @Import(TestcontainersConfiguration.class)
 @SuppressWarnings("null")
-class CreateTransactionAccountServiceIntegrationTest {
+class TransactionPostingIntegrationTest {
 
   private static final String READ_TIMEOUT_MS = "500";
   private static final int MAX_ATTEMPTS = 3;
@@ -81,6 +85,7 @@ class CreateTransactionAccountServiceIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionRepository transactionRepository;
   @Autowired OutboxEventRepository outboxEventRepository;
+  @Autowired OutboxPublisher publisher;
   @Autowired JwtDecoder jwtDecoder;
   @Autowired CircuitBreakerRegistry circuitBreakerRegistry;
 
@@ -103,50 +108,106 @@ class CreateTransactionAccountServiceIntegrationTest {
     return "/internal/accounts/" + accountId + "/balance-adjustments";
   }
 
+  private void stubAdjustment(UUID accountId, ResponseDefinitionBuilder response) {
+    accountService.stubFor(post(urlEqualTo(adjustmentPath(accountId))).willReturn(response));
+  }
+
   private void stubAdjustment(UUID accountId, int status) {
-    accountService.stubFor(
-        post(urlEqualTo(adjustmentPath(accountId)))
-            .willReturn(
-                aResponse()
-                    .withStatus(status)
-                    .withHeader("Content-Type", "application/json")
-                    .withBody("{}")));
+    stubAdjustment(
+        accountId,
+        aResponse()
+            .withStatus(status)
+            .withHeader("Content-Type", "application/json")
+            .withBody("{}"));
+  }
+
+  private void stubConflict(UUID accountId, String problemBody) {
+    stubAdjustment(
+        accountId,
+        aResponse()
+            .withStatus(409)
+            .withHeader("Content-Type", "application/problem+json")
+            .withBody(problemBody));
   }
 
   private void verifyAttempts(int count, UUID accountId) {
     accountService.verify(count, postRequestedFor(urlEqualTo(adjustmentPath(accountId))));
   }
 
-  private ResultActions createTransaction(UUID accountId, TransactionType type, String amount)
-      throws Exception {
+  /** Creates a transaction and returns its id, without anything having been delivered yet. */
+  private String create(UUID accountId, TransactionType type, String amount) throws Exception {
     var request = new CreateTransactionRequest(accountId, type, new BigDecimal(amount), null);
-    return mockMvc.perform(
-        MockMvcRequestBuilders.post("/transactions")
-            .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
-            .contentType(MediaType.APPLICATION_JSON)
-            .content(objectMapper.writeValueAsString(request)));
+    var result =
+        mockMvc
+            .perform(
+                MockMvcRequestBuilders.post("/transactions")
+                    .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(objectMapper.writeValueAsString(request)))
+            .andExpect(status().isAccepted())
+            .andExpect(jsonPath("$.status").value("PENDING"))
+            .andExpect(jsonPath("$.rejectionReason").isEmpty())
+            .andExpect(jsonPath("$.accountId").value(accountId.toString()))
+            .andReturn();
+    return objectMapper.readTree(result.getResponse().getContentAsString()).get("id").asText();
+  }
+
+  private ResultActions getTransaction(String id) throws Exception {
+    return mockMvc
+        .perform(MockMvcRequestBuilders.get("/transactions/{id}", id).with(jwt()))
+        .andExpect(status().isOk());
+  }
+
+  private void assertStatus(String id, String status) throws Exception {
+    getTransaction(id)
+        .andExpect(jsonPath("$.status").value(status))
+        .andExpect(jsonPath("$.rejectionReason").isEmpty());
+  }
+
+  private void assertRejected(String id, String reason) throws Exception {
+    getTransaction(id)
+        .andExpect(jsonPath("$.status").value("REJECTED"))
+        .andExpect(jsonPath("$.rejectionReason").value(reason));
+  }
+
+  private OutboxEvent eventFor(String id) {
+    var events = outboxEventRepository.findByAggregateIdOrderByCreatedAt(UUID.fromString(id));
+    assertThat(events).hasSize(1);
+    return events.get(0);
   }
 
   @Test
-  void credit_postsPositiveDeltaWithServiceToken_andPersists() throws Exception {
+  void create_doesNotCallAccountService_untilTheEventIsPublished() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 200);
 
-    createTransaction(accountId, TransactionType.CREDIT, "250.00")
-        .andExpect(status().isCreated())
-        .andExpect(jsonPath("$.accountId").value(accountId.toString()));
+    String id = create(accountId, TransactionType.CREDIT, "250.00");
+
+    verifyAttempts(0, accountId);
+    assertStatus(id, "PENDING");
+
+    publisher.publishPending();
+
+    verifyAttempts(1, accountId);
+    assertStatus(id, "POSTED");
+    assertThat(eventFor(id).getPublishedAt()).isNotNull();
+  }
+
+  @Test
+  void credit_postsPositiveDeltaWithServiceToken() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubAdjustment(accountId, 200);
+
+    String id = create(accountId, TransactionType.CREDIT, "250.00");
+    publisher.publishPending();
 
     accountService.verify(
         1,
         postRequestedFor(urlEqualTo(adjustmentPath(accountId)))
             .withHeader("Content-Type", equalTo("application/json"))
             .withHeader("Authorization", matching("Bearer .+"))
-            .withRequestBody(equalToJson("{\"delta\": 250.00}", false, true))
-            .withRequestBody(
-                matchingJsonPath(
-                    "$.adjustmentId",
-                    equalTo(transactionRepository.findAll().get(0).getId().toString()))));
-    assertThat(transactionRepository.count()).isEqualTo(1);
+            .withRequestBody(equalToJson("{\"delta\": 250.0000}", false, true))
+            .withRequestBody(matchingJsonPath("$.adjustmentId", equalTo(id))));
 
     // The token must pass the same HS256 validation account-service applies, with the SERVICE role.
     String authorization =
@@ -159,19 +220,15 @@ class CreateTransactionAccountServiceIntegrationTest {
   @Test
   void create_commitsTransactionCreatedOutboxEventWithTheRow() throws Exception {
     UUID accountId = UUID.randomUUID();
-    stubAdjustment(accountId, 200);
 
-    createTransaction(accountId, TransactionType.CREDIT, "250.00").andExpect(status().isCreated());
+    String id = create(accountId, TransactionType.CREDIT, "250.00");
 
-    UUID transactionId = transactionRepository.findAll().get(0).getId();
-    var events = outboxEventRepository.findByAggregateIdOrderByCreatedAt(transactionId);
-    assertThat(events).hasSize(1);
-    var event = events.get(0);
+    var event = eventFor(id);
     assertThat(event.getAggregateType()).isEqualTo("Transaction");
     assertThat(event.getEventType()).isEqualTo("TransactionCreated");
     assertThat(event.getPublishedAt()).isNull();
     var payload = objectMapper.readTree(event.getPayload());
-    assertThat(payload.get("transactionId").asText()).isEqualTo(transactionId.toString());
+    assertThat(payload.get("transactionId").asText()).isEqualTo(id);
     assertThat(payload.get("accountId").asText()).isEqualTo(accountId.toString());
     assertThat(payload.get("type").asText()).isEqualTo("CREDIT");
     assertThat(payload.get("amount").decimalValue()).isEqualByComparingTo("250.00");
@@ -182,7 +239,8 @@ class CreateTransactionAccountServiceIntegrationTest {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 200);
 
-    createTransaction(accountId, TransactionType.DEBIT, "40.50").andExpect(status().isCreated());
+    create(accountId, TransactionType.DEBIT, "40.50");
+    publisher.publishPending();
 
     accountService.verify(
         postRequestedFor(urlEqualTo(adjustmentPath(accountId)))
@@ -190,94 +248,126 @@ class CreateTransactionAccountServiceIntegrationTest {
   }
 
   @Test
-  void accountNotFound_returns404_andRollsBackInsert() throws Exception {
+  void accountNotFound_rejectsTransaction() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 404);
 
-    createTransaction(accountId, TransactionType.CREDIT, "10.00")
-        .andExpect(status().isNotFound())
-        .andExpect(jsonPath("$.detail").value("Account not found: " + accountId));
+    String id = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
+    publisher.publishPending();
 
     verifyAttempts(1, accountId);
-    assertThat(transactionRepository.count()).isZero();
-    assertThat(outboxEventRepository.count()).isZero();
+    assertRejected(id, "ACCOUNT_NOT_FOUND");
+    assertThat(eventFor(id).getFailedAt()).isNotNull();
   }
 
   @Test
-  void accountRejectsChange_returns409_andRollsBackInsert() throws Exception {
-    UUID accountId = UUID.randomUUID();
-    stubAdjustment(accountId, 409);
-
-    createTransaction(accountId, TransactionType.DEBIT, "10.00").andExpect(status().isConflict());
-
-    verifyAttempts(1, accountId);
-    assertThat(transactionRepository.count()).isZero();
-    assertThat(outboxEventRepository.count()).isZero();
-  }
-
-  @Test
-  void insufficientFunds_returns422Problem_andRollsBackInsert() throws Exception {
+  void insufficientFunds_rejectsTransaction() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 422);
 
-    createTransaction(accountId, TransactionType.DEBIT, "40.50")
-        .andExpect(status().isUnprocessableEntity())
-        .andExpect(content().contentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON))
-        .andExpect(jsonPath("$.type").value("urn:ledgerwatch:problem:insufficient-funds"))
-        .andExpect(jsonPath("$.title").value("Insufficient funds"))
-        .andExpect(jsonPath("$.accountId").value(accountId.toString()))
-        .andExpect(jsonPath("$.amount").value(40.50));
+    String id = create(accountId, TransactionType.DEBIT, "40.50");
+    publisher.publishPending();
 
     verifyAttempts(1, accountId);
-    assertThat(transactionRepository.count()).isZero();
-    assertThat(outboxEventRepository.count()).isZero();
+    assertRejected(id, "INSUFFICIENT_FUNDS");
   }
 
   @Test
-  void accountServiceError_isRetriedThenReturns502_andRollsBackInsert() throws Exception {
+  void frozenAccount_rejectsTransaction() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubConflict(
+        accountId,
+        """
+        {"type": "urn:ledgerwatch:problem:account-not-active", "status": 409,
+         "detail": "Account is FROZEN", "accountStatus": "FROZEN"}
+        """);
+
+    String id = create(accountId, TransactionType.DEBIT, "10.00");
+    publisher.publishPending();
+
+    verifyAttempts(1, accountId);
+    assertRejected(id, "ACCOUNT_NOT_ACTIVE");
+    assertThat(eventFor(id).getLastError()).contains("FROZEN");
+  }
+
+  @Test
+  void concurrentModificationConflict_staysPending_andIsRetried() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubConflict(
+        accountId,
+        """
+        {"type": "about:blank", "status": 409,
+         "detail": "Account was modified concurrently; re-read and retry"}
+        """);
+
+    String id = create(accountId, TransactionType.DEBIT, "10.00");
+    publisher.publishPending();
+
+    verifyAttempts(1, accountId);
+    assertStatus(id, "PENDING");
+    var event = eventFor(id);
+    assertThat(event.getFailedAt()).isNull();
+    assertThat(event.getAttempts()).isEqualTo(1);
+    assertThat(event.getLastError()).contains("modified concurrently");
+    assertThat(breaker().getMetrics().getNumberOfFailedCalls()).isZero();
+  }
+
+  @Test
+  void conflictWithoutABody_isRetriedRatherThanRejected() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubAdjustment(accountId, aResponse().withStatus(409));
+
+    String id = create(accountId, TransactionType.DEBIT, "10.00");
+    publisher.publishPending();
+
+    assertStatus(id, "PENDING");
+    assertThat(eventFor(id).getFailedAt()).isNull();
+  }
+
+  @Test
+  void accountServiceError_isRetried_andStaysPending() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 500);
 
-    createTransaction(accountId, TransactionType.CREDIT, "10.00")
-        .andExpect(status().isBadGateway());
+    String id = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
 
     verifyAttempts(MAX_ATTEMPTS, accountId);
-    assertThat(transactionRepository.count()).isZero();
-    assertThat(outboxEventRepository.count()).isZero();
+    assertStatus(id, "PENDING");
+    assertThat(eventFor(id).getFailedAt()).isNull();
   }
 
   @Test
-  void accountServiceRejectsServiceToken_returns502_withoutRetry() throws Exception {
+  void accountServiceRejectsServiceToken_parksEventWithoutRetry_andStaysPending() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 403);
 
-    createTransaction(accountId, TransactionType.CREDIT, "10.00")
-        .andExpect(status().isBadGateway());
+    String id = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
 
+    // A broken credential says nothing about the transaction, so it must not be rejected.
     verifyAttempts(1, accountId);
-    assertThat(transactionRepository.count()).isZero();
-    assertThat(outboxEventRepository.count()).isZero();
+    assertStatus(id, "PENDING");
+    assertThat(eventFor(id).getFailedAt()).isNotNull();
   }
 
   @Test
-  void accountServiceSlowerThanReadTimeout_isRetriedThenReturns502_andRollsBackInsert()
-      throws Exception {
+  void accountServiceSlowerThanReadTimeout_isRetried_andStaysPending() throws Exception {
     UUID accountId = UUID.randomUUID();
-    accountService.stubFor(
-        post(urlEqualTo(adjustmentPath(accountId)))
-            .willReturn(
-                aResponse().withStatus(200).withFixedDelay(Integer.parseInt(READ_TIMEOUT_MS) * 4)));
+    stubAdjustment(
+        accountId,
+        aResponse().withStatus(200).withFixedDelay(Integer.parseInt(READ_TIMEOUT_MS) * 4));
 
-    createTransaction(accountId, TransactionType.CREDIT, "10.00")
-        .andExpect(status().isBadGateway());
+    String id = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
 
     verifyAttempts(MAX_ATTEMPTS, accountId);
-    assertThat(transactionRepository.count()).isZero();
-    assertThat(outboxEventRepository.count()).isZero();
+    assertStatus(id, "PENDING");
   }
 
   @Test
-  void transient503_isRetriedWithSameAdjustmentId_andSucceeds() throws Exception {
+  void transient503_isRetriedWithSameAdjustmentId_andPosts() throws Exception {
     UUID accountId = UUID.randomUUID();
     accountService.stubFor(
         post(urlEqualTo(adjustmentPath(accountId)))
@@ -291,35 +381,36 @@ class CreateTransactionAccountServiceIntegrationTest {
             .whenScenarioStateIs("recovered")
             .willReturn(aResponse().withStatus(200).withBody("{}")));
 
-    createTransaction(accountId, TransactionType.CREDIT, "10.00").andExpect(status().isCreated());
+    String id = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
 
-    String transactionId = transactionRepository.findAll().get(0).getId().toString();
+    assertStatus(id, "POSTED");
     accountService.verify(
         2,
         postRequestedFor(urlEqualTo(adjustmentPath(accountId)))
-            .withRequestBody(matchingJsonPath("$.adjustmentId", equalTo(transactionId))));
+            .withRequestBody(matchingJsonPath("$.adjustmentId", equalTo(id))));
   }
 
   @Test
-  void repeatedFailures_openBreaker_whichFailsFastWith503_andShowsOpenOnActuator()
-      throws Exception {
+  void repeatedFailures_openBreaker_whichStopsDelivery_andShowsOpenOnActuator() throws Exception {
     UUID accountId = UUID.randomUUID();
     stubAdjustment(accountId, 500);
 
     // MAX_ATTEMPTS failures, then one more fills the window and trips the breaker mid-retry.
-    createTransaction(accountId, TransactionType.CREDIT, "10.00")
-        .andExpect(status().isBadGateway());
-    createTransaction(accountId, TransactionType.CREDIT, "10.00")
-        .andExpect(status().isServiceUnavailable());
+    String first = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
+    String second = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
     assertThat(breaker().getState()).isEqualTo(CircuitBreaker.State.OPEN);
     verifyAttempts(BREAKER_WINDOW, accountId);
 
-    // While open, nothing reaches account-service.
-    createTransaction(accountId, TransactionType.CREDIT, "10.00")
-        .andExpect(status().isServiceUnavailable())
-        .andExpect(jsonPath("$.detail").value("Account service is unavailable; try again later"));
+    // While open, nothing reaches account-service, and creating transactions still works.
+    String third = create(accountId, TransactionType.CREDIT, "10.00");
+    publisher.publishPending();
     verifyAttempts(BREAKER_WINDOW, accountId);
-    assertThat(transactionRepository.count()).isZero();
+    assertStatus(first, "PENDING");
+    assertStatus(second, "PENDING");
+    assertStatus(third, "PENDING");
 
     mockMvc
         .perform(
@@ -335,9 +426,9 @@ class CreateTransactionAccountServiceIntegrationTest {
     stubAdjustment(accountId, 404);
 
     for (int i = 0; i < BREAKER_WINDOW * 2; i++) {
-      createTransaction(accountId, TransactionType.CREDIT, "10.00")
-          .andExpect(status().isNotFound());
+      create(accountId, TransactionType.CREDIT, "10.00");
     }
+    publisher.publishPending();
 
     assertThat(breaker().getState()).isEqualTo(CircuitBreaker.State.CLOSED);
     verifyAttempts(BREAKER_WINDOW * 2, accountId);
@@ -356,11 +447,21 @@ class CreateTransactionAccountServiceIntegrationTest {
   }
 
   @Test
-  void overPreciseAmount_returns400_withoutCallingAccountService() throws Exception {
-    createTransaction(UUID.randomUUID(), TransactionType.CREDIT, "1.00001")
+  void overPreciseAmount_returns400_withoutCreatingAnything() throws Exception {
+    var request =
+        new CreateTransactionRequest(
+            UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("1.00001"), null);
+
+    mockMvc
+        .perform(
+            MockMvcRequestBuilders.post("/transactions")
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(request)))
         .andExpect(status().isBadRequest())
         .andExpect(jsonPath("$.errors.amount").isNotEmpty());
 
-    assertThat(accountService.getAllServeEvents()).isEmpty();
+    assertThat(transactionRepository.count()).isZero();
+    assertThat(outboxEventRepository.count()).isZero();
   }
 }

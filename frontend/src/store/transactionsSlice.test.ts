@@ -30,6 +30,7 @@ const mockTransaction: Transaction = {
     accountId: 'acc-1',
     type: 'DEBIT',
     status: 'POSTED',
+    rejectionReason: null,
     amount: '50.00',
     description: 'Coffee',
     createdAt: '2024-01-15T10:00:00Z',

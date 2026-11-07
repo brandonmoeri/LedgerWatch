@@ -15,8 +15,12 @@ import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
+import com.ledgerwatch.transactionservice.domain.Transaction;
+import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
+import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
+import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -62,6 +66,7 @@ class OutboxPublisherIntegrationTest {
 
   @Autowired OutboxPublisher publisher;
   @Autowired OutboxEventRepository outboxEventRepository;
+  @Autowired TransactionRepository transactionRepository;
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionTemplate transactionTemplate;
   @Autowired CircuitBreakerRegistry circuitBreakerRegistry;
@@ -168,6 +173,30 @@ class OutboxPublisherIntegrationTest {
     assertThat(event.getFailedAt()).isNotNull();
     assertThat(event.getPublishedAt()).isNull();
     assertThat(event.getLastError()).contains("Account not found");
+  }
+
+  @Test
+  void redelivery_doesNotUndoALaterStatusChange() throws Exception {
+    Transaction tx = new Transaction();
+    tx.setAccountId(UUID.randomUUID());
+    tx.setType(TransactionType.CREDIT);
+    tx.setAmount(new BigDecimal("50.00"));
+    tx.setStatus(TransactionStatus.VOIDED);
+    UUID id = transactionRepository.save(tx).getId();
+
+    transactionTemplate.executeWithoutResult(
+        status -> {
+          assertThat(transactionRepository.markPosted(id, Instant.now())).isZero();
+          assertThat(
+                  transactionRepository.markRejected(
+                      id, TransactionRejectionReason.ACCOUNT_NOT_FOUND, Instant.now()))
+              .isZero();
+        });
+
+    Transaction reloaded = transactionRepository.findById(id).orElseThrow();
+    assertThat(reloaded.getStatus()).isEqualTo(TransactionStatus.VOIDED);
+    assertThat(reloaded.getRejectionReason()).isNull();
+    transactionRepository.deleteAll();
   }
 
   @Test

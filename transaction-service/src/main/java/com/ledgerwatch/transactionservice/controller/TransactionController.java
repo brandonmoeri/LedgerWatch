@@ -96,24 +96,24 @@ public class TransactionController {
   @Operation(
       summary = "Create a transaction",
       description =
-          "Send an Idempotency-Key header to make retries safe. A repeat of the same request "
-              + "with the same key returns the original 201 response, with an "
-              + "Idempotent-Replayed: true header, and does not create a second transaction or "
-              + "adjust the balance again. Keys are scoped to the caller and are only recorded "
-              + "when the request succeeds.")
+          "Records the transaction as PENDING and returns 202. The balance is applied "
+              + "asynchronously: GET the transaction until its status is POSTED or REJECTED "
+              + "(see rejectionReason). Send an Idempotency-Key header to make retries safe. A "
+              + "repeat of the same request with the same key returns the original 202 response, "
+              + "with an Idempotent-Replayed: true header and the status from creation time, and "
+              + "does not create a second transaction. Keys are scoped to the caller and are only "
+              + "recorded when the request succeeds.")
   @ApiResponses({
     @ApiResponse(
-        responseCode = "201",
-        description = "Transaction created, or the original response replayed"),
+        responseCode = "202",
+        description = "Transaction accepted as PENDING, or the original response replayed"),
     @ApiResponse(
         responseCode = "400",
         description = "Validation failed",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "422",
-        description =
-            "Idempotency-Key was already used with a different request, or a DEBIT exceeds the"
-                + " account balance (type urn:ledgerwatch:problem:insufficient-funds)",
+        description = "Idempotency-Key was already used with a different request",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
   })
   public ResponseEntity<TransactionResponse> createTransaction(
@@ -124,7 +124,7 @@ public class TransactionController {
       Authentication authentication) {
     CreateTransactionResult result =
         transactionService.createTransaction(request, authentication.getName(), idempotencyKey);
-    ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.CREATED);
+    ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.ACCEPTED);
     if (result.replayed()) {
       response.header(IDEMPOTENT_REPLAYED_HEADER, "true");
     }
@@ -146,7 +146,9 @@ public class TransactionController {
         content = @Content(schema = @Schema(implementation = ProblemDetail.class))),
     @ApiResponse(
         responseCode = "409",
-        description = "Voided transaction cannot be modified",
+        description =
+            "Transaction is VOIDED or REJECTED, or the status change isn't allowed: only POSTED"
+                + " can be changed, to VOIDED",
         content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
   })
   public TransactionResponse updateTransaction(

@@ -5,7 +5,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.IdempotencyRecord;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.Transaction;
@@ -51,7 +50,6 @@ class TransactionServiceTest {
   @Mock TransactionRepository transactionRepository;
   @Mock IdempotencyRecordRepository idempotencyRecordRepository;
   @Mock OutboxEventRepository outboxEventRepository;
-  @Mock AccountServiceClient accountServiceClient;
   @Spy ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
   @InjectMocks TransactionService transactionService;
 
@@ -65,6 +63,7 @@ class TransactionServiceTest {
     existing.setAccountId(UUID.randomUUID());
     existing.setType(TransactionType.CREDIT);
     existing.setAmount(new BigDecimal("100.00"));
+    existing.setStatus(TransactionStatus.POSTED);
   }
 
   @Test
@@ -78,48 +77,13 @@ class TransactionServiceTest {
 
     assertThat(result.getType()).isEqualTo(TransactionType.DEBIT);
     assertThat(result.getAmount()).isEqualByComparingTo("50.00");
-    assertThat(result.getStatus()).isEqualTo(TransactionStatus.POSTED);
+    assertThat(result.getStatus()).isEqualTo(TransactionStatus.PENDING);
+    assertThat(result.getRejectionReason()).isNull();
     verify(transactionRepository).saveAndFlush(any());
   }
 
   @Test
-  void create_debit_appliesNegativeDeltaAfterInsert() {
-    when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
-    UUID accountId = UUID.randomUUID();
-
-    transactionService.createTransaction(
-        new CreateTransactionRequest(
-            accountId, TransactionType.DEBIT, new BigDecimal("50.00"), null));
-
-    InOrder inOrder = inOrder(transactionRepository, accountServiceClient);
-    inOrder.verify(transactionRepository).saveAndFlush(any());
-    inOrder
-        .verify(accountServiceClient)
-        .applyBalanceDelta(eq(accountId), eq(new BigDecimal("-50.00")), any());
-  }
-
-  @Test
-  void create_credit_appliesPositiveDeltaKeyedByTransactionId() {
-    UUID transactionId = UUID.randomUUID();
-    when(transactionRepository.saveAndFlush(any()))
-        .thenAnswer(
-            inv -> {
-              Transaction tx = inv.getArgument(0);
-              ReflectionTestUtils.setField(tx, "id", transactionId);
-              return tx;
-            });
-    UUID accountId = UUID.randomUUID();
-
-    transactionService.createTransaction(
-        new CreateTransactionRequest(
-            accountId, TransactionType.CREDIT, new BigDecimal("75.25"), null));
-
-    verify(accountServiceClient)
-        .applyBalanceDelta(accountId, new BigDecimal("75.25"), transactionId);
-  }
-
-  @Test
-  void create_writesTransactionCreatedOutboxEventBeforeCallingAccountService() throws Exception {
+  void create_writesTransactionCreatedOutboxEvent() throws Exception {
     UUID transactionId = UUID.randomUUID();
     when(transactionRepository.saveAndFlush(any()))
         .thenAnswer(
@@ -135,10 +99,9 @@ class TransactionServiceTest {
             accountId, TransactionType.DEBIT, new BigDecimal("12.34"), "Coffee"));
 
     ArgumentCaptor<OutboxEvent> event = ArgumentCaptor.forClass(OutboxEvent.class);
-    InOrder inOrder = inOrder(transactionRepository, outboxEventRepository, accountServiceClient);
+    InOrder inOrder = inOrder(transactionRepository, outboxEventRepository);
     inOrder.verify(transactionRepository).saveAndFlush(any());
     inOrder.verify(outboxEventRepository).saveAndFlush(event.capture());
-    inOrder.verify(accountServiceClient).applyBalanceDelta(any(), any(), any());
 
     assertThat(event.getValue().getAggregateType()).isEqualTo("Transaction");
     assertThat(event.getValue().getAggregateId()).isEqualTo(transactionId);
@@ -149,21 +112,6 @@ class TransactionServiceTest {
     assertThat(payload.get("type").asText()).isEqualTo("DEBIT");
     assertThat(payload.get("amount").decimalValue()).isEqualByComparingTo("12.34");
     assertThat(payload.get("description").asText()).isEqualTo("Coffee");
-  }
-
-  @Test
-  void create_accountServiceRejects_propagatesException() {
-    when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
-    doThrow(new IllegalStateException("frozen"))
-        .when(accountServiceClient)
-        .applyBalanceDelta(any(), any(), any());
-
-    assertThatThrownBy(
-            () ->
-                transactionService.createTransaction(
-                    new CreateTransactionRequest(
-                        UUID.randomUUID(), TransactionType.DEBIT, BigDecimal.TEN, null)))
-        .isInstanceOf(IllegalStateException.class);
   }
 
   @Test
@@ -179,34 +127,28 @@ class TransactionServiceTest {
 
     assertThat(result.replayed()).isFalse();
     verifyNoInteractions(idempotencyRecordRepository);
-    verify(accountServiceClient).applyBalanceDelta(any(), any(), any());
   }
 
   @Test
-  void createIdempotent_newKey_claimsAndStoresResponseBeforeCallingAccountService() {
+  void createIdempotent_newKey_claimsAndStoresResponse() {
     when(transactionRepository.saveAndFlush(any())).thenAnswer(inv -> inv.getArgument(0));
     when(idempotencyRecordRepository.claim(eq("admin"), eq("key-1"), any())).thenReturn(1);
-    UUID accountId = UUID.randomUUID();
 
     CreateTransactionResult result =
         transactionService.createTransaction(
             new CreateTransactionRequest(
-                accountId, TransactionType.DEBIT, new BigDecimal("5.00"), "coffee"),
+                UUID.randomUUID(), TransactionType.DEBIT, new BigDecimal("5.00"), "coffee"),
             "admin",
             "key-1");
 
     assertThat(result.replayed()).isFalse();
     assertThat(result.response().description()).isEqualTo("coffee");
-    InOrder inOrder =
-        inOrder(idempotencyRecordRepository, transactionRepository, accountServiceClient);
+    InOrder inOrder = inOrder(idempotencyRecordRepository, transactionRepository);
     inOrder.verify(idempotencyRecordRepository).claim(eq("admin"), eq("key-1"), any());
     inOrder.verify(transactionRepository).saveAndFlush(any());
     inOrder
         .verify(idempotencyRecordRepository)
         .complete(eq("admin"), eq("key-1"), any(), contains("\"coffee\""));
-    inOrder
-        .verify(accountServiceClient)
-        .applyBalanceDelta(eq(accountId), eq(new BigDecimal("-5.00")), any());
   }
 
   @Test
@@ -220,7 +162,8 @@ class TransactionServiceTest {
             UUID.randomUUID(),
             request.accountId(),
             TransactionType.CREDIT,
-            TransactionStatus.POSTED,
+            TransactionStatus.PENDING,
+            null,
             new BigDecimal("10.50"),
             null,
             Instant.parse("2026-01-01T00:00:00Z"),
@@ -244,7 +187,6 @@ class TransactionServiceTest {
     assertThat(result.replayed()).isTrue();
     assertThat(result.response()).isEqualTo(original);
     verify(transactionRepository, never()).saveAndFlush(any());
-    verifyNoInteractions(accountServiceClient);
   }
 
   @Test
@@ -264,7 +206,6 @@ class TransactionServiceTest {
                     "key-1"))
         .isInstanceOf(IdempotencyKeyReusedException.class);
     verify(transactionRepository, never()).saveAndFlush(any());
-    verifyNoInteractions(accountServiceClient);
   }
 
   @Test
@@ -282,7 +223,7 @@ class TransactionServiceTest {
                     "admin",
                     "k".repeat(TransactionService.MAX_IDEMPOTENCY_KEY_LENGTH + 1)))
         .isInstanceOf(IllegalArgumentException.class);
-    verifyNoInteractions(idempotencyRecordRepository, accountServiceClient);
+    verifyNoInteractions(idempotencyRecordRepository);
   }
 
   @Test
@@ -322,6 +263,47 @@ class TransactionServiceTest {
     assertThat(result.getContent()).containsExactly(existing);
     verify(transactionRepository)
         .findAll(ArgumentMatchers.<Specification<Transaction>>any(), eq(pageable));
+  }
+
+  @Test
+  void update_refusesStatusChangesOutsidePostedToVoided() {
+    Transaction pending = new Transaction();
+    when(transactionRepository.findById(existingId)).thenReturn(Optional.of(pending));
+
+    for (TransactionStatus target :
+        List.of(TransactionStatus.POSTED, TransactionStatus.REJECTED, TransactionStatus.VOIDED)) {
+      assertThatThrownBy(
+              () ->
+                  transactionService.updateTransaction(
+                      existingId, new UpdateTransactionRequest(target, null)))
+          .isInstanceOf(IllegalStateException.class);
+    }
+    assertThat(pending.getStatus()).isEqualTo(TransactionStatus.PENDING);
+
+    when(transactionRepository.findById(existingId)).thenReturn(Optional.of(existing));
+    assertThatThrownBy(
+            () ->
+                transactionService.updateTransaction(
+                    existingId, new UpdateTransactionRequest(TransactionStatus.PENDING, null)))
+        .isInstanceOf(IllegalStateException.class);
+    verify(transactionRepository, never()).save(any());
+  }
+
+  @Test
+  void update_refusesAnyChangeToATerminalTransaction() {
+    for (TransactionStatus terminal :
+        List.of(TransactionStatus.REJECTED, TransactionStatus.VOIDED)) {
+      existing.setStatus(terminal);
+      when(transactionRepository.findById(existingId)).thenReturn(Optional.of(existing));
+
+      assertThatThrownBy(
+              () ->
+                  transactionService.updateTransaction(
+                      existingId, new UpdateTransactionRequest(null, "memo")))
+          .isInstanceOf(IllegalStateException.class)
+          .hasMessageContaining(terminal.name());
+    }
+    verify(transactionRepository, never()).save(any());
   }
 
   @Test

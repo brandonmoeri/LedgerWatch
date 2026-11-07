@@ -1,6 +1,7 @@
 package com.ledgerwatch.transactionservice.dto;
 
 import com.ledgerwatch.transactionservice.domain.Transaction;
+import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import java.math.BigDecimal;
@@ -12,6 +13,7 @@ public record TransactionResponse(
     UUID accountId,
     TransactionType type,
     TransactionStatus status,
+    TransactionRejectionReason rejectionReason,
     BigDecimal amount,
     String description,
     Instant createdAt,
@@ -22,6 +24,7 @@ public record TransactionResponse(
         t.getAccountId(),
         t.getType(),
         t.getStatus(),
+        t.getRejectionReason(),
         t.getAmount(),
         t.getDescription(),
         t.getCreatedAt(),

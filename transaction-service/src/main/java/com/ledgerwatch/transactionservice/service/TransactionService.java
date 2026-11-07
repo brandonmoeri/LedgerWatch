@@ -2,7 +2,6 @@ package com.ledgerwatch.transactionservice.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
@@ -51,19 +50,16 @@ public class TransactionService {
   private final TransactionRepository repo;
   private final IdempotencyRecordRepository idempotencyRepo;
   private final OutboxEventRepository outboxRepo;
-  private final AccountServiceClient accountServiceClient;
   private final ObjectMapper objectMapper;
 
   public TransactionService(
       TransactionRepository repo,
       IdempotencyRecordRepository idempotencyRepo,
       OutboxEventRepository outboxRepo,
-      AccountServiceClient accountServiceClient,
       ObjectMapper objectMapper) {
     this.repo = repo;
     this.idempotencyRepo = idempotencyRepo;
     this.outboxRepo = outboxRepo;
-    this.accountServiceClient = accountServiceClient;
     this.objectMapper = objectMapper;
   }
 
@@ -125,25 +121,23 @@ public class TransactionService {
   }
 
   /**
-   * Inserts the transaction and its {@code TransactionCreated} outbox event, then applies it to the
-   * account balance in account-service. Both rows are flushed first so local constraint failures
-   * surface before any remote side effect; if the balance adjustment is rejected or fails, the
-   * exception rolls both back, so no event is ever left for a transaction that didn't commit.
+   * Inserts a PENDING transaction and its {@code TransactionCreated} outbox event in one DB
+   * transaction, so neither exists without the other. The balance is not touched here: the outbox
+   * publisher applies the event and settles the transaction as POSTED or REJECTED.
    */
   @Transactional
   public Transaction createTransaction(CreateTransactionRequest request) {
-    Transaction saved = insert(request);
-    applyToBalance(saved);
-    return saved;
+    return insert(request);
   }
 
   /**
    * Creates the transaction at most once per {@code (caller, idempotencyKey)}, the same way as
    * {@link #createTransaction(CreateTransactionRequest)}. If the key was already used for the same
-   * request, this returns the stored original response. The key is claimed before anything else, so
-   * a concurrent duplicate waits on the unique constraint and then replays. Only successes are
-   * stored: a failure rolls the claim back with the insert, so the client can retry with the key. A
-   * null key creates the transaction without idempotency.
+   * request, this returns the stored original response, which keeps the status from creation time.
+   * The key is claimed before anything else, so a concurrent duplicate waits on the unique
+   * constraint and then replays. Only successes are stored: a failure rolls the claim back with the
+   * insert, so the client can retry with the key. A null key creates the transaction without
+   * idempotency.
    */
   @Transactional
   public CreateTransactionResult createTransaction(
@@ -166,7 +160,6 @@ public class TransactionService {
     Transaction saved = insert(request);
     TransactionResponse response = TransactionResponse.from(saved);
     idempotencyRepo.complete(caller, idempotencyKey, saved.getId(), toJson(response));
-    applyToBalance(saved);
     return new CreateTransactionResult(response, false);
   }
 
@@ -232,20 +225,23 @@ public class TransactionService {
     return saved;
   }
 
-  private void applyToBalance(Transaction saved) {
-    BigDecimal delta =
-        saved.getType() == TransactionType.CREDIT ? saved.getAmount() : saved.getAmount().negate();
-    // The transaction id doubles as the adjustment id, so client retries can't apply it twice.
-    accountServiceClient.applyBalanceDelta(saved.getAccountId(), delta, saved.getId());
-  }
-
+  /**
+   * Updates the description and voids posted transactions. The rest of the lifecycle isn't open to
+   * callers: PENDING settles only on account-service's answer, since voiding one would leave its
+   * in-flight balance change behind, and REJECTED and VOIDED are terminal.
+   */
   @Transactional
   public Transaction updateTransaction(UUID id, UpdateTransactionRequest request) {
     Transaction tx = Objects.requireNonNull(getById(id), "getById returned null");
-    if (TransactionStatus.VOIDED.equals(tx.getStatus())) {
-      throw new IllegalStateException("Voided transaction cannot be modified: " + id);
+    TransactionStatus current = tx.getStatus();
+    if (current == TransactionStatus.VOIDED || current == TransactionStatus.REJECTED) {
+      throw new IllegalStateException(current + " transaction cannot be modified: " + id);
     }
-    if (request.status() != null) {
+    if (request.status() != null && request.status() != current) {
+      if (current != TransactionStatus.POSTED || request.status() != TransactionStatus.VOIDED) {
+        throw new IllegalStateException(
+            "Cannot change status from " + current + " to " + request.status() + ": " + id);
+      }
       tx.setStatus(request.status());
     }
     if (request.description() != null) {

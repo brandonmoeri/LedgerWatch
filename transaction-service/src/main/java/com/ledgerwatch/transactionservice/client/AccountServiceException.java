@@ -2,7 +2,7 @@ package com.ledgerwatch.transactionservice.client;
 
 /**
  * account-service could not be reached, timed out, or answered in a way this service cannot act on
- * (5xx, auth failure, unexpected 4xx). Mapped to 502 Bad Gateway.
+ * (5xx, auth failure, unexpected 4xx).
  */
 public class AccountServiceException extends RuntimeException {
 

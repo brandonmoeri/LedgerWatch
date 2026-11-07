@@ -6,11 +6,17 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.*;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ledgerwatch.common.error.AccountNotActiveException;
+import com.ledgerwatch.common.error.InsufficientFundsException;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
+import com.ledgerwatch.transactionservice.client.AccountServiceConflictException;
+import com.ledgerwatch.transactionservice.client.AccountServiceException;
 import com.ledgerwatch.transactionservice.client.AccountServiceUnavailableException;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
+import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
+import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import java.math.BigDecimal;
@@ -44,6 +50,7 @@ class OutboxPublisherTest {
           Duration.ofMinutes(5));
 
   @Mock OutboxEventRepository repo;
+  @Mock TransactionRepository transactionRepo;
   @Mock AccountServiceClient accountServiceClient;
 
   private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
@@ -56,6 +63,7 @@ class OutboxPublisherTest {
     publisher =
         new OutboxPublisher(
             repo,
+            transactionRepo,
             accountServiceClient,
             circuitBreakerRegistry,
             TransactionOperations.withoutTransaction(),
@@ -100,6 +108,7 @@ class OutboxPublisherTest {
         .applyBalanceDelta(accountId, new BigDecimal("-12.34"), transactionId);
     assertThat(event.getPublishedAt()).isEqualTo(NOW);
     assertThat(event.getAttempts()).isZero();
+    verify(transactionRepo).markPosted(transactionId, NOW);
     verify(repo).save(event);
   }
 
@@ -137,6 +146,23 @@ class OutboxPublisherTest {
     assertThat(event.getNextAttemptAt()).isEqualTo(NOW.plusSeconds(1));
     assertThat(event.getLastError()).contains("503");
     verify(repo).save(event);
+    verifyNoInteractions(transactionRepo);
+  }
+
+  @Test
+  void conflict_backsOffLikeAnOutageAndDoesNotRejectTheTransaction() throws Exception {
+    OutboxEvent event = event();
+    due(event);
+    doThrow(new AccountServiceConflictException("account-service returned 409: modified"))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any(), any());
+
+    publisher.publishPending();
+
+    assertThat(event.getFailedAt()).isNull();
+    assertThat(event.getAttempts()).isEqualTo(1);
+    assertThat(event.getNextAttemptAt()).isEqualTo(NOW.plusSeconds(1));
+    verifyNoInteractions(transactionRepo);
   }
 
   @Test
@@ -166,8 +192,9 @@ class OutboxPublisherTest {
   }
 
   @Test
-  void rejection_parksEventWithoutRetry() throws Exception {
-    OutboxEvent event = event();
+  void accountNotFound_parksEventAndRejectsTransaction() throws Exception {
+    UUID transactionId = UUID.randomUUID();
+    OutboxEvent event = event(transactionId, UUID.randomUUID(), TransactionType.DEBIT, "10.00");
     due(event);
     doThrow(new NoSuchElementException("Account not found"))
         .when(accountServiceClient)
@@ -178,7 +205,58 @@ class OutboxPublisherTest {
     assertThat(event.getFailedAt()).isEqualTo(NOW);
     assertThat(event.getPublishedAt()).isNull();
     assertThat(event.getLastError()).isEqualTo("NoSuchElementException: Account not found");
+    verify(transactionRepo)
+        .markRejected(transactionId, TransactionRejectionReason.ACCOUNT_NOT_FOUND, NOW);
     verify(repo).save(event);
+  }
+
+  @Test
+  void accountNotActive_rejectsTransaction() throws Exception {
+    UUID transactionId = UUID.randomUUID();
+    UUID accountId = UUID.randomUUID();
+    OutboxEvent event = event(transactionId, accountId, TransactionType.DEBIT, "10.00");
+    due(event);
+    doThrow(new AccountNotActiveException(accountId, "FROZEN"))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any(), any());
+
+    publisher.publishPending();
+
+    assertThat(event.getFailedAt()).isEqualTo(NOW);
+    verify(transactionRepo)
+        .markRejected(transactionId, TransactionRejectionReason.ACCOUNT_NOT_ACTIVE, NOW);
+  }
+
+  @Test
+  void insufficientFunds_rejectsTransaction() throws Exception {
+    UUID transactionId = UUID.randomUUID();
+    UUID accountId = UUID.randomUUID();
+    OutboxEvent event = event(transactionId, accountId, TransactionType.DEBIT, "10.00");
+    due(event);
+    doThrow(new InsufficientFundsException(accountId, new BigDecimal("10.00")))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any(), any());
+
+    publisher.publishPending();
+
+    assertThat(event.getFailedAt()).isEqualTo(NOW);
+    verify(transactionRepo)
+        .markRejected(transactionId, TransactionRejectionReason.INSUFFICIENT_FUNDS, NOW);
+  }
+
+  @Test
+  void authFailure_parksEventButLeavesTransactionPending() throws Exception {
+    OutboxEvent event = event();
+    due(event);
+    doThrow(new AccountServiceException("account-service returned 403"))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any(), any());
+
+    publisher.publishPending();
+
+    assertThat(event.getFailedAt()).isEqualTo(NOW);
+    verify(repo).save(event);
+    verifyNoInteractions(transactionRepo);
   }
 
   @Test
@@ -188,7 +266,7 @@ class OutboxPublisherTest {
 
     publisher.publishPending();
 
-    verifyNoInteractions(accountServiceClient);
+    verifyNoInteractions(accountServiceClient, transactionRepo);
     assertThat(event.getFailedAt()).isEqualTo(NOW);
     assertThat(event.getLastError()).contains("SomethingElse");
   }

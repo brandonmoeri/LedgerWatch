@@ -10,6 +10,7 @@ import com.ledgerwatch.accountservice.repository.AccountRepository;
 import com.ledgerwatch.accountservice.repository.AccountSpecifications;
 import com.ledgerwatch.accountservice.repository.BalanceAdjustmentRepository;
 import com.ledgerwatch.accountservice.repository.ProcessedEventRepository;
+import com.ledgerwatch.common.error.AccountNotActiveException;
 import com.ledgerwatch.common.error.InsufficientFundsException;
 import java.math.BigDecimal;
 import java.util.NoSuchElementException;
@@ -203,8 +204,7 @@ public class AccountService {
     }
     Account account = getById(id);
     if (account.getStatus() != AccountStatus.ACTIVE) {
-      throw new IllegalStateException(
-          "Account is " + account.getStatus() + " and cannot accept balance changes: " + id);
+      throw new AccountNotActiveException(id, account.getStatus().name());
     }
     BigDecimal newBalance = account.getBalance().add(delta);
     // Only debits are checked, so a credit is accepted even if the balance is already negative.
