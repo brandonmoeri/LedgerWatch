@@ -2,7 +2,7 @@
 
 ## System overview
 
-LedgerWatch is a small personal-finance ledger built as two independent Spring Boot microservices sharing a single Postgres instance (separate schemas, each migrated by Flyway), fronted by a React SPA, with the account service deployed to AWS via Terraform. Both services are stateless JWT resource servers that validate tokens signed with a shared HMAC secret; account-service also issues those tokens.
+LedgerWatch is a small personal-finance ledger built as two independent Spring Boot microservices sharing a single Postgres instance (separate schemas, each migrated by Flyway), fronted by a React SPA, with Terraform config in `infra/aws/` that deploys both services to AWS. Both services are stateless JWT resource servers that validate tokens signed with a shared HMAC secret; account-service also issues those tokens.
 
 ```
 Browser
@@ -39,7 +39,7 @@ LedgerWatch/
 ├── docker-compose.yml             # Postgres 16 + account-service + transaction-service
 ├── docs/adr/                      # Architecture decision records
 ├── .env.example                   # DB_* and JWT_SECRET template
-└── infra/aws/                     # Terraform — account-service on ECS/RDS
+└── infra/aws/                     # Terraform — both services on ECS/RDS (network, ecs-service, rds modules)
 ```
 
 ---
@@ -178,6 +178,55 @@ PENDING ──> POSTED ──> VOIDED     (VOIDED: PATCH by an ADMIN)
 - **Settling is atomic and conditional.** The status and the outbox row change in one local DB transaction, and the update only applies `WHERE status = 'PENDING'`, so a redelivery can't overwrite a later status. `Transaction` uses `@DynamicUpdate`, so a concurrent `PATCH` of the description can't overwrite a settled status.
 - **Crash window:** if the publisher dies after account-service applied the change but before the local commit, the lease expires, the event is redelivered, the adjustment replays as a no-op, and the transaction posts.
 - **Dashboard:** `/transactions/summary` counts `POSTED` only, so pending and rejected transactions don't appear in it.
+
+#### Posting flow
+
+A transaction posts in two stages: `POST /transactions` records it and returns, then `OutboxPublisher` applies it and settles the status on a later poll. Both Postgres participants are schemas in the same database. The diagram leaves out idempotent replays; see [Idempotent creates](#idempotent-creates).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant API as transaction-service<br/>REST API
+    participant TxDB as Postgres<br/>transactions schema
+    participant Pub as OutboxPublisher<br/>(transaction-service)
+    participant Acct as account-service
+    participant AcctDB as Postgres<br/>accounts schema
+
+    Client->>API: POST /transactions
+    API->>TxDB: In one DB transaction:<br/>insert transaction (PENDING)<br/>insert outbox_event
+    API-->>Client: 202 Accepted, status PENDING
+
+    loop Every poll-interval, skipped while the circuit breaker is open
+        Pub->>TxDB: Claim due rows (FOR UPDATE SKIP LOCKED)<br/>and lease them via next_attempt_at
+        TxDB-->>Pub: Up to batch-size events
+
+        loop Each event, outside any DB transaction
+            Pub->>Acct: POST /internal/accounts/{id}/balance-adjustments<br/>adjustmentId = transaction id, signed delta
+            Acct->>AcctDB: Known adjustmentId: replay, no change<br/>Otherwise check ACTIVE and funds, then<br/>update balance and insert balance_adjustment
+
+            alt Applied or replayed
+                Acct-->>Pub: 200 OK
+                Pub->>TxDB: In one DB transaction:<br/>PENDING to POSTED, set published_at
+            else Business rejection
+                Acct-->>Pub: 404, 409 account-not-active, or 422
+                Pub->>TxDB: In one DB transaction:<br/>PENDING to REJECTED with rejection_reason,<br/>set failed_at (parked)
+            else Timeout, connection failure, 5xx, or other 409
+                Acct--xPub: No usable answer
+                Pub->>TxDB: Record the failure, back off next_attempt_at<br/>Transaction stays PENDING
+            else Auth failure, other 4xx, or unusable event
+                Acct--xPub: Says nothing about the transaction
+                Pub->>TxDB: Set failed_at (parked for an operator)<br/>Transaction stays PENDING
+            else Circuit breaker refuses the call
+                Pub->>TxDB: Release this event and the rest of the batch<br/>Stop until the next poll
+            end
+        end
+    end
+
+    Client->>API: GET /transactions/{id}
+    API->>TxDB: Read transaction
+    API-->>Client: 200 OK with status and rejectionReason
+```
 
 #### Calls to account-service
 
@@ -337,7 +386,16 @@ Vitest + jsdom + `@testing-library/react`. Test setup in `src/test/setup.ts`.
 
 ## Infrastructure (AWS)
 
-Terraform config in `infra/aws/` (Terraform ≥ 1.5, AWS provider ~5.0) deploys **account-service only**.
+Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service and transaction-service**. The root module wires four local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
+
+| Module | Owns |
+|---|---|
+| `modules/network` | VPC, internet gateway, public subnets, route table |
+| `modules/rds` | Postgres instance, subnet group, security group, DB credentials secret |
+| `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service |
+| `modules/ecs-service` | One service: ECR repository, log group, execution role, security group, Cloud Map record, task definition, ECS service |
+
+The two services are separate `ecs-service` module calls rather than a `for_each`, because they reference each other: account-service allows ingress from transaction-service's security group, and transaction-service reads account-service's internal URL.
 
 ### Resources
 
@@ -345,24 +403,34 @@ Terraform config in `infra/aws/` (Terraform ≥ 1.5, AWS provider ~5.0) deploys 
 |---|---|
 | **VPC** | `10.0.0.0/16`, DNS support/hostnames enabled |
 | **Subnets** | 2 public subnets across 2 AZs (`10.0.1.0/24`, `10.0.2.0/24`), route to IGW |
-| **ECR** | `ledgerwatch/account-service` — mutable tags |
+| **ECR** | `ledgerwatch/account-service`, `ledgerwatch/transaction-service` — mutable tags |
 | **ECS Cluster** | `ledgerwatch-cluster` (Fargate) |
-| **ECS Task** | Fargate, 0.5 vCPU / 1 GB, container port `8081`, logs to CloudWatch (`/ecs/ledgerwatch-account-service`, 3-day retention) |
-| **ECS Service** | `desired_count = 1`, public IP assigned directly (no ALB) |
+| **ECS Tasks** | Fargate, 0.5 vCPU / 1 GB each, container ports `8081` and `8082`, logs to CloudWatch (`/ecs/ledgerwatch-<service>`, 3-day retention) |
+| **ECS Services** | `desired_count = 1` each, public IP assigned directly, registered with the ALB; a 180-second health check grace period covers startup |
+| **ALB** | Internet-facing, HTTP on port `80`. `/accounts`, `/accounts/*`, `/auth`, `/auth/*` → account-service; `/transactions*` → transaction-service; anything else → fixed `404`. Target groups use IP targets and check `/actuator/health` every 30 seconds |
+| **Cloud Map** | Private DNS namespace `ledgerwatch.local`; transaction-service calls `http://account-service.ledgerwatch.local:8081` via `ACCOUNT_SERVICE_URL` |
 | **RDS** | Postgres 16, `db.t4g.micro`, 20 GB gp3, single-AZ, publicly accessible, no final snapshot |
-| **Secrets Manager** | `ledgerwatch/account-service/db` stores `url`, `username`, `password` JSON; ECS task role reads it at startup |
-| **Security groups** | ECS task: all egress open; ingress on `8081` gated by optional `admin_cidr` variable. RDS: inbound `5432` from ECS task SG only |
+| **Secrets Manager** | `ledgerwatch/db` stores `url`, `username`, `password` JSON; `ledgerwatch/jwt` stores the shared HMAC key. Each service's task execution role reads them at startup |
+| **Security groups** | One per service: all egress open; ingress on the container port from the ALB, plus the optional `admin_cidr` variable. account-service also allows `8081` from transaction-service. RDS: inbound `5432` from both service SGs (and optional `admin_cidr`) |
 
 ### Notable design choices
 
-- **No load balancer or NAT Gateway** — cost-minimized; ECS tasks get public IPs directly.
-- **RDS is publicly accessible** with a randomly generated 24-char password; access is locked to the ECS task's security group (and optionally a one-time admin CIDR for schema seeding).
+- **No NAT Gateway** — cost-minimized; ECS tasks get public IPs directly, though only the ALB, sibling services and `admin_cidr` can reach them.
+- **ALB default action is a `404`** — routes are an allowlist, so `/internal/*`, `/actuator/*` and Swagger stay off the public endpoint.
+- **HTTP only** — there's no domain or ACM certificate yet, so credentials and JWTs cross the internet unencrypted. Add an HTTPS listener before putting real data behind this.
+- **RDS is publicly accessible** with a randomly generated 24-char password; access is locked to the service security groups (and optionally a one-time admin CIDR for schema seeding).
 - `backup_retention_period = 0` and `skip_final_snapshot = true` — this deployment is torn down after smoke-test verification.
 - DB credentials are injected into the container as secrets using the ECS `secrets` field (resolves individual JSON keys from the Secrets Manager ARN at task startup).
 
+### Terraform state
+
+State is stored in S3 at `ledgerwatch/terraform.tfstate`, with S3 native locking (`use_lockfile`) rather than a DynamoDB table. The bucket, `ledgerwatch-tfstate-<account-id>`, is created by a separate config in `infra/aws/bootstrap/`, which keeps its own state locally because it can't store state in a bucket that doesn't exist yet. That config is deliberately outside the root module, so `terraform destroy` leaves the state bucket alone.
+
+State contains the DB password and JWT key in plaintext, so the bucket blocks public access, encrypts with SSE-S3, denies non-TLS requests and sets `prevent_destroy`. Versioning keeps superseded state for 90 days as the recovery path. The backend block is a partial config: the bucket name is passed at `terraform init` so the account ID stays out of the repo. Bootstrap steps are in the README.
+
 ### Terraform outputs
 
-`ecr_repository_url`, `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `ecs_service_name`, `db_secret_arn`, `db_password` (sensitive).
+`alb_url`, `ecr_repository_urls` and `ecs_service_names` (maps keyed by service), `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `db_secret_arn`, `db_password` (sensitive).
 
 ---
 

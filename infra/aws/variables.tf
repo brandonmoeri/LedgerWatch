@@ -23,7 +23,7 @@ variable "db_username" {
 }
 
 variable "admin_cidr" {
-  description = "CIDR allowed to reach RDS on 5432 directly (your current IP, for one-time schema migration). Leave empty to disable."
+  description = "CIDR allowed to reach RDS and both services directly (your current IP, for one-time schema migration and verification). Leave empty to disable."
   type        = string
   default     = ""
 }
