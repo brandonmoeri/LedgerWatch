@@ -386,7 +386,7 @@ Vitest + jsdom + `@testing-library/react`. Test setup in `src/test/setup.ts`.
 
 ## Infrastructure (AWS)
 
-Terraform config in `infra/aws/` (Terraform ≥ 1.5, AWS provider ~5.0) deploys **account-service and transaction-service**. The root module wires three local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
+Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service and transaction-service**. The root module wires three local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
 
 | Module | Owns |
 |---|---|
@@ -417,6 +417,12 @@ The two services are separate `ecs-service` module calls rather than a `for_each
 - **RDS is publicly accessible** with a randomly generated 24-char password; access is locked to the service security groups (and optionally a one-time admin CIDR for schema seeding).
 - `backup_retention_period = 0` and `skip_final_snapshot = true` — this deployment is torn down after smoke-test verification.
 - DB credentials are injected into the container as secrets using the ECS `secrets` field (resolves individual JSON keys from the Secrets Manager ARN at task startup).
+
+### Terraform state
+
+State is stored in S3 at `ledgerwatch/terraform.tfstate`, with S3 native locking (`use_lockfile`) rather than a DynamoDB table. The bucket, `ledgerwatch-tfstate-<account-id>`, is created by a separate config in `infra/aws/bootstrap/`, which keeps its own state locally because it can't store state in a bucket that doesn't exist yet. That config is deliberately outside the root module, so `terraform destroy` leaves the state bucket alone.
+
+State contains the DB password and JWT key in plaintext, so the bucket blocks public access, encrypts with SSE-S3, denies non-TLS requests and sets `prevent_destroy`. Versioning keeps superseded state for 90 days as the recovery path. The backend block is a partial config: the bucket name is passed at `terraform init` so the account ID stays out of the repo. Bootstrap steps are in the README.
 
 ### Terraform outputs
 

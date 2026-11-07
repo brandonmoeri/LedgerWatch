@@ -81,9 +81,38 @@ Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`,
 
 Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. `transaction-service` reaches `account-service` over Cloud Map private DNS. No load balancer or NAT Gateway (cost-minimized).
 
+### Remote state
+
+Terraform state lives in S3 (`ledgerwatch/terraform.tfstate`), so it survives a lost laptop and is locked during writes. Locking uses S3 native lockfiles (`use_lockfile`), so there's no DynamoDB table; this needs Terraform ≥ 1.11. The bucket can't be managed through the backend it hosts, so `infra/aws/bootstrap/` creates it, keeping its own small state locally.
+
+Do this once per AWS account, from `infra/aws/`:
+
+```bash
+# 1. Grant your IAM user access to the state bucket (needs IAM admin rights).
+aws iam put-user-policy --user-name <your-iam-user> --policy-name ledgerwatch-tfstate --policy-document file://bootstrap/operator-policy.json
+
+# 2. Create the bucket: ledgerwatch-tfstate-<account-id>
+terraform -chdir=bootstrap init
+terraform -chdir=bootstrap apply
+
+# 3. Point this config at it. -migrate-state copies any existing local state across.
+terraform init -migrate-state -backend-config="bucket=$(terraform -chdir=bootstrap output -raw state_bucket)"
+
+# 4. Confirm the state is remote, then remove the local copies, which can hold secrets in plaintext.
+terraform state pull
+rm terraform.tfstate*
+```
+
+On a new machine or clone, skip all of that and pass the bucket name directly: `terraform init -backend-config="bucket=ledgerwatch-tfstate-<account-id>"`. The bootstrap's local state isn't needed for normal use. If it's lost, `terraform -chdir=bootstrap import aws_s3_bucket.state <bucket>` recovers the bucket, and the same goes for the other resources in `bootstrap/main.tf`.
+
+If a crashed run leaves a stale lock, `terraform force-unlock <lock-id>` clears it (the ID is in the error message). To undo a bad state write, restore an earlier object version: they're kept for 90 days.
+
+### Deploying
+
+Requires the [remote state](#remote-state) bootstrap above.
+
 ```bash
 cd infra/aws
-terraform init
 terraform apply -target=module.account_service.aws_ecr_repository.this -target=module.transaction_service.aws_ecr_repository.this
 
 # build & push both images from the repo root (repo URLs: terraform output ecr_repository_urls)
@@ -98,7 +127,7 @@ docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<r
 terraform apply -var "admin_cidr=<your-ip>/32"
 ```
 
-**Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. Terraform state is local (`infra/aws/*.tfstate*`, gitignored) — the resources above are not currently running; this is the reproducible path to bring them back up.
+**Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. This leaves the state bucket in place: it costs pennies a month and has `prevent_destroy` set. The resources above are not currently running; this is the reproducible path to bring them back up.
 
 Approximate cost if left running continuously: ~$1.60/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo).
 
