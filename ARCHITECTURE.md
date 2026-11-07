@@ -2,7 +2,7 @@
 
 ## System overview
 
-LedgerWatch is a small personal-finance ledger built as two independent Spring Boot microservices sharing a single Postgres instance (separate schemas, each migrated by Flyway), fronted by a React SPA, with the account service deployed to AWS via Terraform. Both services are stateless JWT resource servers that validate tokens signed with a shared HMAC secret; account-service also issues those tokens.
+LedgerWatch is a small personal-finance ledger built as two independent Spring Boot microservices sharing a single Postgres instance (separate schemas, each migrated by Flyway), fronted by a React SPA, with Terraform config in `infra/aws/` that deploys both services to AWS. Both services are stateless JWT resource servers that validate tokens signed with a shared HMAC secret; account-service also issues those tokens.
 
 ```
 Browser
@@ -39,7 +39,7 @@ LedgerWatch/
 ├── docker-compose.yml             # Postgres 16 + account-service + transaction-service
 ├── docs/adr/                      # Architecture decision records
 ├── .env.example                   # DB_* and JWT_SECRET template
-└── infra/aws/                     # Terraform — account-service on ECS/RDS
+└── infra/aws/                     # Terraform — both services on ECS/RDS (network, ecs-service, rds modules)
 ```
 
 ---
@@ -386,7 +386,15 @@ Vitest + jsdom + `@testing-library/react`. Test setup in `src/test/setup.ts`.
 
 ## Infrastructure (AWS)
 
-Terraform config in `infra/aws/` (Terraform ≥ 1.5, AWS provider ~5.0) deploys **account-service only**.
+Terraform config in `infra/aws/` (Terraform ≥ 1.5, AWS provider ~5.0) deploys **account-service and transaction-service**. The root module wires three local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
+
+| Module | Owns |
+|---|---|
+| `modules/network` | VPC, internet gateway, public subnets, route table |
+| `modules/rds` | Postgres instance, subnet group, security group, DB credentials secret |
+| `modules/ecs-service` | One service: ECR repository, log group, execution role, security group, Cloud Map record, task definition, ECS service |
+
+The two services are separate `ecs-service` module calls rather than a `for_each`, because they reference each other: account-service allows ingress from transaction-service's security group, and transaction-service reads account-service's internal URL.
 
 ### Resources
 
@@ -394,24 +402,25 @@ Terraform config in `infra/aws/` (Terraform ≥ 1.5, AWS provider ~5.0) deploys 
 |---|---|
 | **VPC** | `10.0.0.0/16`, DNS support/hostnames enabled |
 | **Subnets** | 2 public subnets across 2 AZs (`10.0.1.0/24`, `10.0.2.0/24`), route to IGW |
-| **ECR** | `ledgerwatch/account-service` — mutable tags |
+| **ECR** | `ledgerwatch/account-service`, `ledgerwatch/transaction-service` — mutable tags |
 | **ECS Cluster** | `ledgerwatch-cluster` (Fargate) |
-| **ECS Task** | Fargate, 0.5 vCPU / 1 GB, container port `8081`, logs to CloudWatch (`/ecs/ledgerwatch-account-service`, 3-day retention) |
-| **ECS Service** | `desired_count = 1`, public IP assigned directly (no ALB) |
+| **ECS Tasks** | Fargate, 0.5 vCPU / 1 GB each, container ports `8081` and `8082`, logs to CloudWatch (`/ecs/ledgerwatch-<service>`, 3-day retention) |
+| **ECS Services** | `desired_count = 1` each, public IP assigned directly (no ALB) |
+| **Cloud Map** | Private DNS namespace `ledgerwatch.local`; transaction-service calls `http://account-service.ledgerwatch.local:8081` via `ACCOUNT_SERVICE_URL` |
 | **RDS** | Postgres 16, `db.t4g.micro`, 20 GB gp3, single-AZ, publicly accessible, no final snapshot |
-| **Secrets Manager** | `ledgerwatch/account-service/db` stores `url`, `username`, `password` JSON; ECS task role reads it at startup |
-| **Security groups** | ECS task: all egress open; ingress on `8081` gated by optional `admin_cidr` variable. RDS: inbound `5432` from ECS task SG only |
+| **Secrets Manager** | `ledgerwatch/db` stores `url`, `username`, `password` JSON; `ledgerwatch/jwt` stores the shared HMAC key. Each service's task execution role reads them at startup |
+| **Security groups** | One per service: all egress open; ingress on the container port gated by optional `admin_cidr` variable. account-service also allows `8081` from transaction-service. RDS: inbound `5432` from both service SGs (and optional `admin_cidr`) |
 
 ### Notable design choices
 
 - **No load balancer or NAT Gateway** — cost-minimized; ECS tasks get public IPs directly.
-- **RDS is publicly accessible** with a randomly generated 24-char password; access is locked to the ECS task's security group (and optionally a one-time admin CIDR for schema seeding).
+- **RDS is publicly accessible** with a randomly generated 24-char password; access is locked to the service security groups (and optionally a one-time admin CIDR for schema seeding).
 - `backup_retention_period = 0` and `skip_final_snapshot = true` — this deployment is torn down after smoke-test verification.
 - DB credentials are injected into the container as secrets using the ECS `secrets` field (resolves individual JSON keys from the Secrets Manager ARN at task startup).
 
 ### Terraform outputs
 
-`ecr_repository_url`, `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `ecs_service_name`, `db_secret_arn`, `db_password` (sensitive).
+`ecr_repository_urls` and `ecs_service_names` (maps keyed by service), `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `db_secret_arn`, `db_password` (sensitive).
 
 ---
 

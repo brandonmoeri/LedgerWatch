@@ -11,7 +11,7 @@ A banking microservice platform for tracking accounts and transactions, built as
 | Postgres + both services (local, via Docker Compose) | Running — `accounts` and `transactions` schemas owned by per-service Flyway migrations |
 | React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create, and transactions pages; Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
 | CI/CD | **CI functional** — GitHub Actions on PRs to `master`/`dev`: path-filtered per-service Spotless check + `mvn verify` (JaCoCo 70% coverage gate), frontend type check + lint + Vitest; Docker images published to GHCR on push to `dev`. Deployment (CD) not started |
-| AWS infra (`account-service`) | IaC ready (Terraform, `infra/aws/`) — deployed to ECS Fargate + RDS and CRUD-verified end-to-end; torn down after verification |
+| AWS infra | IaC ready (Terraform modules, `infra/aws/`) for both services on ECS Fargate + RDS. `account-service` was deployed and CRUD-verified on the earlier single-service config, then torn down; the two-service config has been planned but not yet applied |
 
 ## Architecture
 
@@ -34,7 +34,7 @@ LedgerWatch/
 ├── frontend/                 # React/TS SPA — Vite, Redux Toolkit, React Router
 ├── docker/postgres/init.sql  # Schema seed (accounts + transactions schemas)
 ├── docker-compose.yml        # Postgres + account-service + transaction-service
-├── infra/aws/                # Terraform — account-service AWS deployment
+├── infra/aws/                # Terraform — AWS deployment (network, ecs-service, rds modules)
 └── pom.xml                   # Maven parent (Java 21, Spring Boot 3.3.4)
 ```
 
@@ -77,28 +77,30 @@ Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 
 Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`, `VOIDED`. The balance is applied asynchronously: poll `GET /transactions/{id}` until the status is `POSTED` or `REJECTED`, which comes with a `rejectionReason` (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE` or `INSUFFICIENT_FUNDS`).
 
-## AWS deployment (`account-service`)
+## AWS deployment
 
-Terraform config in `infra/aws/` deploys `account-service`: ECR → ECS Fargate → RDS Postgres, with DB credentials via Secrets Manager. No load balancer or NAT Gateway (cost-minimized). Torn down after CRUD verification.
+Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. `transaction-service` reaches `account-service` over Cloud Map private DNS. No load balancer or NAT Gateway (cost-minimized).
 
 ```bash
 cd infra/aws
 terraform init
-terraform apply -target=aws_ecr_repository.account_service
+terraform apply -target=module.account_service.aws_ecr_repository.this -target=module.transaction_service.aws_ecr_repository.this
 
-# build & push image
+# build & push both images from the repo root (repo URLs: terraform output ecr_repository_urls)
 aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
-docker build -f account-service/Dockerfile -t <ecr-repo-url>:latest .
-docker push <ecr-repo-url>:latest
+docker build -f account-service/Dockerfile -t <account-service-repo-url>:latest .
+docker build -f transaction-service/Dockerfile -t <transaction-service-repo-url>:latest .
+docker push <account-service-repo-url>:latest
+docker push <transaction-service-repo-url>:latest
 
-terraform apply -var "admin_cidr=<your-ip>/32" -target=aws_db_instance.main
-docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<rds_endpoint>:5432/ledgerwatch?sslmode=require" < docker/postgres/init.sql
+terraform apply -var "admin_cidr=<your-ip>/32" -target=module.rds
+docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<rds_endpoint>:5432/ledgerwatch?sslmode=require" < docker/postgres/init.sql  # from the repo root
 terraform apply -var "admin_cidr=<your-ip>/32"
 ```
 
 **Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. Terraform state is local (`infra/aws/*.tfstate*`, gitignored) — the resources above are not currently running; this is the reproducible path to bring them back up.
 
-Approximate cost if left running continuously: ~$1/day (RDS ~$12-13/mo, Fargate task ~$18/mo).
+Approximate cost if left running continuously: ~$1.60/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo).
 
 ## Running tests
 
