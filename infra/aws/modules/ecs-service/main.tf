@@ -161,10 +161,22 @@ resource "aws_ecs_service" "this" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
+  health_check_grace_period_seconds = var.load_balancer != null ? var.load_balancer.health_check_grace_period_seconds : null
+
   network_configuration {
     subnets          = var.subnet_ids
     security_groups  = [aws_security_group.task.id]
     assign_public_ip = true
+  }
+
+  dynamic "load_balancer" {
+    for_each = var.load_balancer != null ? [var.load_balancer] : []
+
+    content {
+      target_group_arn = load_balancer.value.target_group_arn
+      container_name   = var.service_name
+      container_port   = var.container_port
+    }
   }
 
   service_registries {

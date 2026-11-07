@@ -79,7 +79,7 @@ Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`,
 
 ## AWS deployment
 
-Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. `transaction-service` reaches `account-service` over Cloud Map private DNS. No load balancer or NAT Gateway (cost-minimized).
+Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. An Application Load Balancer is the public entry point: `/accounts` and `/auth` go to `account-service`, `/transactions*` to `transaction-service`, and any other path gets a 404, so `/internal/*` isn't exposed. It listens on plain HTTP only. `transaction-service` reaches `account-service` over Cloud Map private DNS. No NAT Gateway (cost-minimized).
 
 ### Remote state
 
@@ -125,11 +125,12 @@ docker push <transaction-service-repo-url>:latest
 terraform apply -var "admin_cidr=<your-ip>/32" -target=module.rds
 docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<rds_endpoint>:5432/ledgerwatch?sslmode=require" < docker/postgres/init.sql  # from the repo root
 terraform apply -var "admin_cidr=<your-ip>/32"
+curl -i "$(terraform output -raw alb_url)/accounts"  # 401 from account-service means routing works
 ```
 
 **Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. This leaves the state bucket in place: it costs pennies a month and has `prevent_destroy` set. The resources above are not currently running; this is the reproducible path to bring them back up.
 
-Approximate cost if left running continuously: ~$1.60/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo).
+Approximate cost if left running continuously: ~$2.15/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo, ALB ~$17/mo).
 
 ## Running tests
 

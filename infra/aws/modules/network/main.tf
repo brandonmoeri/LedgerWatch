@@ -25,7 +25,7 @@ resource "aws_internet_gateway" "main" {
 }
 
 # Public subnets host both RDS (needs a public endpoint) and the Fargate tasks,
-# which get their own public IPs (no load balancer or NAT, to keep this cheap).
+# which get their own public IPs (no NAT, to keep this cheap).
 resource "aws_subnet" "public" {
   count                   = 2
   vpc_id                  = aws_vpc.main.id

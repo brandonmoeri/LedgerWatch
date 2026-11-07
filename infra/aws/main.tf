@@ -58,6 +58,27 @@ locals {
   }
 }
 
+module "alb" {
+  source = "./modules/alb"
+
+  project    = var.project
+  vpc_id     = module.network.vpc_id
+  subnet_ids = module.network.public_subnet_ids
+
+  services = {
+    account-service = {
+      port     = 8081
+      paths    = ["/accounts", "/accounts/*", "/auth", "/auth/*"]
+      priority = 100
+    }
+    transaction-service = {
+      port     = 8082
+      paths    = ["/transactions*"]
+      priority = 200
+    }
+  }
+}
+
 module "account_service" {
   source = "./modules/ecs-service"
 
@@ -73,8 +94,13 @@ module "account_service" {
   container_port = 8081
   secrets        = local.service_secrets
 
+  load_balancer = {
+    target_group_arn = module.alb.target_group_arns["account-service"]
+  }
+
   # transaction-service's outbox publisher applies balance adjustments here.
   allowed_security_groups = {
+    "Load balancer"                    = module.alb.security_group_id
     "transaction-service Fargate task" = module.transaction_service.security_group_id
   }
 }
@@ -93,6 +119,14 @@ module "transaction_service" {
   service_name   = "transaction-service"
   container_port = 8082
   secrets        = local.service_secrets
+
+  load_balancer = {
+    target_group_arn = module.alb.target_group_arns["transaction-service"]
+  }
+
+  allowed_security_groups = {
+    "Load balancer" = module.alb.security_group_id
+  }
 
   environment = {
     ACCOUNT_SERVICE_URL = module.account_service.internal_url

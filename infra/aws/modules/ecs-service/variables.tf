@@ -88,6 +88,15 @@ variable "allowed_security_groups" {
   default     = {}
 }
 
+variable "load_balancer" {
+  description = "Target group to register tasks with, and how long ECS ignores its health checks while a new task starts. Leave null to run without a load balancer."
+  type = object({
+    target_group_arn                  = string
+    health_check_grace_period_seconds = optional(number, 180)
+  })
+  default = null
+}
+
 variable "admin_cidr" {
   description = "CIDR allowed to reach container_port directly. Leave empty to disable."
   type        = string

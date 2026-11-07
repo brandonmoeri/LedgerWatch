@@ -5,6 +5,11 @@ output "ecr_repository_urls" {
   }
 }
 
+output "alb_url" {
+  description = "Public base URL for both services"
+  value       = "http://${module.alb.dns_name}"
+}
+
 output "rds_endpoint" {
   value = module.rds.address
 }
