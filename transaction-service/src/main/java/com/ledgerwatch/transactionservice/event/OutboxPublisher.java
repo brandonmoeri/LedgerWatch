@@ -17,7 +17,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
-import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionOperations;
 
@@ -84,8 +83,7 @@ public class OutboxPublisher {
     this.clock = clock;
   }
 
-  /** One poll. Scheduled only when {@code outbox.publisher.enabled} (see SchedulingConfig). */
-  @Scheduled(fixedDelayString = "${outbox.publisher.poll-interval}")
+  /** One poll. Scheduled every {@code outbox.publisher.poll-interval} by SchedulingConfig. */
   public void publishPending() {
     if (breaker().getState() == CircuitBreaker.State.OPEN) {
       log.debug("Skipping outbox poll: account-service circuit breaker is open");
