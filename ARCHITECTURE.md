@@ -179,6 +179,55 @@ PENDING ──> POSTED ──> VOIDED     (VOIDED: PATCH by an ADMIN)
 - **Crash window:** if the publisher dies after account-service applied the change but before the local commit, the lease expires, the event is redelivered, the adjustment replays as a no-op, and the transaction posts.
 - **Dashboard:** `/transactions/summary` counts `POSTED` only, so pending and rejected transactions don't appear in it.
 
+#### Posting flow
+
+A transaction posts in two stages: `POST /transactions` records it and returns, then `OutboxPublisher` applies it and settles the status on a later poll. Both Postgres participants are schemas in the same database. The diagram leaves out idempotent replays; see [Idempotent creates](#idempotent-creates).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Client
+    participant API as transaction-service<br/>REST API
+    participant TxDB as Postgres<br/>transactions schema
+    participant Pub as OutboxPublisher<br/>(transaction-service)
+    participant Acct as account-service
+    participant AcctDB as Postgres<br/>accounts schema
+
+    Client->>API: POST /transactions
+    API->>TxDB: In one DB transaction:<br/>insert transaction (PENDING)<br/>insert outbox_event
+    API-->>Client: 202 Accepted, status PENDING
+
+    loop Every poll-interval, skipped while the circuit breaker is open
+        Pub->>TxDB: Claim due rows (FOR UPDATE SKIP LOCKED)<br/>and lease them via next_attempt_at
+        TxDB-->>Pub: Up to batch-size events
+
+        loop Each event, outside any DB transaction
+            Pub->>Acct: POST /internal/accounts/{id}/balance-adjustments<br/>adjustmentId = transaction id, signed delta
+            Acct->>AcctDB: Known adjustmentId: replay, no change<br/>Otherwise check ACTIVE and funds, then<br/>update balance and insert balance_adjustment
+
+            alt Applied or replayed
+                Acct-->>Pub: 200 OK
+                Pub->>TxDB: In one DB transaction:<br/>PENDING to POSTED, set published_at
+            else Business rejection
+                Acct-->>Pub: 404, 409 account-not-active, or 422
+                Pub->>TxDB: In one DB transaction:<br/>PENDING to REJECTED with rejection_reason,<br/>set failed_at (parked)
+            else Timeout, connection failure, 5xx, or other 409
+                Acct--xPub: No usable answer
+                Pub->>TxDB: Record the failure, back off next_attempt_at<br/>Transaction stays PENDING
+            else Auth failure, other 4xx, or unusable event
+                Acct--xPub: Says nothing about the transaction
+                Pub->>TxDB: Set failed_at (parked for an operator)<br/>Transaction stays PENDING
+            else Circuit breaker refuses the call
+                Pub->>TxDB: Release this event and the rest of the batch<br/>Stop until the next poll
+            end
+        end
+    end
+
+    Client->>API: GET /transactions/{id}
+    API->>TxDB: Read transaction
+    API-->>Client: 200 OK with status and rejectionReason
+```
+
 #### Calls to account-service
 
 `OutboxPublisher` applies each transaction through account-service's `POST /internal/accounts/{id}/balance-adjustments` (CREDIT → `+amount`, DEBIT → `-amount`).
