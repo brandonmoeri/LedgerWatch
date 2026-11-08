@@ -161,9 +161,91 @@ curl -s "$URL/api/accounts" -H "Authorization: Bearer $TOKEN" -o /dev/null -w '%
 
 **Continuous deployment:** once the stack is up, [.github/workflows/deploy.yml](.github/workflows/deploy.yml) repeats the image and SPA steps above on every push to `master`: it builds both images, pushes `:latest` and `:<sha>` to ECR, force-redeploys both ECS services and waits until they're stable, then uploads the SPA and invalidates CloudFront. It needs three repository variables: `AWS_DEPLOY_ROLE_ARN` (bootstrap output `github_deploy_role_arn`), `FRONTEND_DISTRIBUTION_ID` (output `frontend_distribution_id`), and `DEPLOY_ENABLED=true`. Unset `DEPLOY_ENABLED` after tearing down so merges skip the deploy rather than fail.
 
-**Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. This leaves the state bucket in place: it costs pennies a month and has `prevent_destroy` set. The resources above are not currently running; this is the reproducible path to bring them back up.
+### Operations
 
-Approximate cost if left running continuously: ~$2.15/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo, ALB ~$17/mo). S3 + CloudFront is pennies at portfolio traffic (within the free tier).
+The stack has three states, and the right one depends on whether anyone needs to reach the live URL without warning:
+
+| State | Cost | Live URL | Time to full service |
+|---|---|---|---|
+| **Running** | ~$88/mo (~$2.90/day) | Works | — |
+| **Paused** (tasks at 0, RDS stopped) | ~$28/mo | Same URL; the SPA loads but every API call fails | ~10 min |
+| **Torn down** | < $0.10/mo | Gone; a new CloudFront URL is created on the next bring-up | ~30 min, partly manual |
+
+#### Monthly cost estimate
+
+These are us-east-1 on-demand list prices with no free tier, at 730 hours a month and portfolio-level traffic:
+
+| Item | Running | Paused | Notes |
+|---|---|---|---|
+| Fargate, 2 tasks × 0.5 vCPU / 1 GB | $36.04 | $0 | `cpu`/`memory` defaults in `modules/ecs-service` |
+| Public IPv4 addresses, $3.65 each | $18.25 (5) | $7.30 (2) | 2 tasks + 2 ALB nodes + RDS. Easy to forget: it's the second-largest line |
+| Application Load Balancer | ~$17 | ~$17 | Hourly charge plus a near-idle LCU charge. Doesn't scale down: this is the floor while the stack exists |
+| RDS `db.t4g.micro` + 20 GB gp3 | $13.98 | $2.30 | Compute $11.68 + storage $2.30. A stopped instance is billed for storage only |
+| Secrets Manager (2 secrets), Cloud Map / Route 53 private zone, ECR, CloudWatch Logs | ~$2 | ~$2 | ECR grows with every deploy's `:<sha>` tag (no lifecycle policy yet) |
+| S3 + CloudFront | ~$0 | ~$0 | Within CloudFront's always-free tier |
+| Terraform state bucket | < $0.10 | < $0.10 | Survives teardown (`prevent_destroy`) |
+| **Total** | **~$88** | **~$28** | |
+
+A rolling deploy briefly runs a third task, which costs fractions of a cent. To check the estimate against the bill, look at Cost Explorer grouped by service.
+
+#### Pausing (scale to zero)
+
+This keeps every resource and URL, and stops the compute charges. Run it from anywhere that has the operator credentials. Stop the services before the database:
+
+```bash
+for s in account-service transaction-service; do
+  aws ecs update-service --cluster ledgerwatch-cluster --service ledgerwatch-$s --desired-count 0 --query service.desiredCount
+done
+aws rds stop-db-instance --db-instance-identifier ledgerwatch-db --query DBInstance.DBInstanceStatus
+```
+
+To resume, start the database first, because the services run Flyway against it on startup:
+
+```bash
+aws rds start-db-instance --db-instance-identifier ledgerwatch-db --query DBInstance.DBInstanceStatus
+aws rds wait db-instance-available --db-instance-identifier ledgerwatch-db
+for s in account-service transaction-service; do
+  aws ecs update-service --cluster ledgerwatch-cluster --service ledgerwatch-$s --desired-count 1 --query service.desiredCount
+done
+aws ecs wait services-stable --cluster ledgerwatch-cluster --services ledgerwatch-account-service ledgerwatch-transaction-service
+```
+
+Caveats:
+- **RDS restarts itself after 7 days stopped** and goes back to full billing. Re-run `stop-db-instance` weekly, or tear down instead.
+- `desired_count` is managed by Terraform (default `1`), so the next `terraform apply` resumes the services. That's harmless, but expect it.
+- A merge to `master` while paused still deploys. The images update and nothing starts, which is fine.
+
+#### Tearing down
+
+1. Turn off continuous deployment first, so a merge during or after teardown is skipped instead of failing: `gh variable delete DEPLOY_ENABLED`.
+2. From `infra/aws/`, run `terraform destroy -var "admin_cidr=<your-ip>/32"`.
+3. Check that nothing is still billing. Every command should print nothing, apart from resources this config doesn't own:
+   ```bash
+   aws ecs list-clusters --query 'clusterArns[?contains(@, `ledgerwatch`)]' --output text
+   aws rds describe-db-instances --query 'DBInstances[].DBInstanceIdentifier' --output text
+   aws elbv2 describe-load-balancers --query 'LoadBalancers[].LoadBalancerName' --output text
+   aws secretsmanager list-secrets --query 'SecretList[].Name' --output text
+   ```
+   The RDS and Secrets Manager checks are unfiltered on purpose: a hand-made instance outside Terraform won't be destroyed by step 2.
+
+What's lost: all data in RDS (there are no backups and no final snapshot; the demo logins live in code, so they still work afterwards), every ECR image (`force_delete`), and the CloudFront and ALB hostnames. What survives: the state bucket and the bootstrap's GitHub OIDC role, both close to free.
+
+**Bringing it back** is the [Deploying](#deploying) section from the top. Afterwards:
+- Set `FRONTEND_DISTRIBUTION_ID` to the new `terraform output -raw frontend_distribution_id`, because the old distribution ID no longer exists.
+- Set `DEPLOY_ENABLED=true` again.
+- Update any link you've shared, because the `*.cloudfront.net` hostname is new.
+
+#### Budget alert
+
+AWS Budgets is free for the first two budgets. This one emails when actual spend passes $80 of a $100 monthly budget, which a running stack nears by the end of a month:
+
+```bash
+aws budgets create-budget --account-id "$(aws sts get-caller-identity --query Account --output text)" \
+  --budget '{"BudgetName":"ledgerwatch-monthly","BudgetLimit":{"Amount":"100","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}' \
+  --notifications-with-subscribers '[{"Notification":{"NotificationType":"ACTUAL","ComparisonOperator":"GREATER_THAN","Threshold":80,"ThresholdType":"PERCENTAGE"},"Subscribers":[{"SubscriptionType":"EMAIL","Address":"<your-email>"}]}]'
+```
+
+The resources above are not currently running. The Deploying section is the reproducible path to bring them back up.
 
 ## Running tests
 
