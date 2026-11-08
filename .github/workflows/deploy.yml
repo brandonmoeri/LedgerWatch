@@ -1,0 +1,151 @@
+name: Deploy
+
+# Automates the manual steps under "Deploying" in README.md, minus Terraform:
+# build both service images, push them to ECR, roll the ECS services onto them,
+# then publish the SPA to S3 and invalidate CloudFront.
+#
+# Prerequisites (repository variables, Settings > Secrets and variables > Actions):
+#   AWS_DEPLOY_ROLE_ARN       terraform -chdir=infra/aws/bootstrap output -raw github_deploy_role_arn
+#   FRONTEND_DISTRIBUTION_ID  terraform -chdir=infra/aws output -raw frontend_distribution_id
+#   DEPLOY_ENABLED            "true" while the infra/aws stack is up. Unset it after
+#                             `terraform destroy` so merges don't fail against
+#                             missing resources.
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  id-token: write # lets jobs request a GitHub OIDC token
+  contents: read
+
+# Never run two deploys at once, and never cancel one halfway through a rollout.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  PROJECT: ledgerwatch
+
+jobs:
+  services:
+    name: Deploy ${{ matrix.service }}
+    # The deploy role only trusts pushes to master/dev (infra/aws/bootstrap/github-oidc.tf),
+    # so a manual run from any other branch would fail at the credentials step.
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [account-service, transaction-service]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configure AWS credentials
+        id: aws
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Compute image name
+        id: image
+        run: |
+          registry="${{ steps.aws.outputs.aws-account-id }}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          echo "registry=$registry" >> "$GITHUB_OUTPUT"
+          echo "repo=$registry/${PROJECT}/${{ matrix.service }}" >> "$GITHUB_OUTPUT"
+
+      # docker/login-action talks to ECR directly using the credentials above.
+      - name: Log in to ECR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ${{ steps.image.outputs.registry }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # The ECS task definitions run :latest (infra/aws/modules/ecs-service image_tag),
+      # so pushing :latest is what the rollout picks up. The :<sha> tag records which
+      # commit each image came from and is the rollback target.
+      - name: Build and push image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.service }}/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.image.outputs.repo }}:${{ github.sha }}
+            ${{ steps.image.outputs.repo }}:latest
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # The deploy role can't register task definitions, so roll the existing one:
+      # a forced deployment starts new tasks that pull the fresh :latest.
+      - name: Roll ECS service
+        run: |
+          aws ecs update-service \
+            --cluster "${PROJECT}-cluster" \
+            --service "${PROJECT}-${{ matrix.service }}" \
+            --force-new-deployment \
+            --query 'service.deployments[0].id' --output text
+
+      # Fails the job if the new tasks don't become healthy (polls for up to 10 minutes).
+      - name: Wait for service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster "${PROJECT}-cluster" \
+            --services "${PROJECT}-${{ matrix.service }}"
+
+  frontend:
+    name: Deploy frontend
+    if: vars.DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Configure AWS credentials
+        id: aws
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Hashed assets are immutable; index.html is revalidated on every request.
+      # Order matters: new assets first, then index.html, then prune old bundles,
+      # so neither the old nor the new index.html ever references a missing file.
+      - name: Upload to S3
+        run: |
+          bucket="${PROJECT}-frontend-${{ steps.aws.outputs.aws-account-id }}"
+          aws s3 sync frontend/dist "s3://$bucket" --exclude index.html \
+            --cache-control "public,max-age=31536000,immutable"
+          aws s3 cp frontend/dist/index.html "s3://$bucket/index.html" \
+            --cache-control "no-cache"
+          aws s3 sync frontend/dist "s3://$bucket" --delete --exclude index.html \
+            --cache-control "public,max-age=31536000,immutable"
+
+      # One wildcard path counts as a single invalidation path for billing.
+      - name: Invalidate CloudFront
+        run: |
+          id=$(aws cloudfront create-invalidation \
+            --distribution-id "${{ vars.FRONTEND_DISTRIBUTION_ID }}" \
+            --paths '/*' \
+            --query 'Invalidation.Id' --output text)
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "${{ vars.FRONTEND_DISTRIBUTION_ID }}" --id "$id"

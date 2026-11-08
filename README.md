@@ -159,6 +159,8 @@ curl -s "$URL/api/accounts" -H "Authorization: Bearer $TOKEN" -o /dev/null -w '%
 
 `aws s3 sync --delete` removes the old hashed bundles; a cached `index.html` from a previous deploy can't outlive its `no-cache` revalidation, so no invalidation is needed. If you ever upload without those headers, run `aws cloudfront create-invalidation --distribution-id "$(terraform -chdir=infra/aws output -raw frontend_distribution_id)" --paths '/*'`.
 
+**Continuous deployment:** once the stack is up, [.github/workflows/deploy.yml](.github/workflows/deploy.yml) repeats the image and SPA steps above on every push to `master`: it builds both images, pushes `:latest` and `:<sha>` to ECR, force-redeploys both ECS services and waits until they're stable, then uploads the SPA and invalidates CloudFront. It needs three repository variables: `AWS_DEPLOY_ROLE_ARN` (bootstrap output `github_deploy_role_arn`), `FRONTEND_DISTRIBUTION_ID` (output `frontend_distribution_id`), and `DEPLOY_ENABLED=true`. Unset `DEPLOY_ENABLED` after tearing down so merges skip the deploy rather than fail.
+
 **Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. This leaves the state bucket in place: it costs pennies a month and has `prevent_destroy` set. The resources above are not currently running; this is the reproducible path to bring them back up.
 
 Approximate cost if left running continuously: ~$2.15/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo, ALB ~$17/mo). S3 + CloudFront is pennies at portfolio traffic (within the free tier).
