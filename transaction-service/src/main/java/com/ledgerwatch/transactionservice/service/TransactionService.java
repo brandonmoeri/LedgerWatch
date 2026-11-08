@@ -2,6 +2,7 @@ package com.ledgerwatch.transactionservice.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.ledgerwatch.common.logging.CorrelationId;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
@@ -221,7 +222,8 @@ public class TransactionService {
             TransactionCreatedEvent.AGGREGATE_TYPE,
             saved.getId(),
             TransactionCreatedEvent.EVENT_TYPE,
-            toJson(TransactionCreatedEvent.from(saved))));
+            toJson(TransactionCreatedEvent.from(saved)),
+            CorrelationId.current()));
     return saved;
   }
 

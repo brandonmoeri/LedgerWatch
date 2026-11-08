@@ -75,6 +75,15 @@ A plain jar (no Spring Boot plugin) that both services depend on. It holds `Abst
 
 Each service's `GlobalExceptionHandler` is a `@RestControllerAdvice` that extends it; account-service adds a `BadCredentialsException` → 401 handler for login. Both Dockerfiles build through the Maven reactor (`-pl <service> -am`), so `common` is compiled into each image, and CI rebuilds both services when `common/` changes.
 
+#### Logging and correlation IDs
+
+`common` also auto-configures (via `CorrelationIdAutoConfiguration`) request correlation and ships the shared `logback-spring.xml`:
+
+- **Inbound:** `CorrelationIdFilter` runs ahead of Spring Security on every request (including Boot's `/error` dispatch). It takes the caller's `X-Correlation-Id` if it matches `[A-Za-z0-9._:-]{1,128}`, otherwise mints a UUID, puts it in the SLF4J MDC as `correlationId`, and echoes it in the response header.
+- **Outbound:** every `RestClient` built from Boot's `RestClient.Builder` gets `CorrelationIdInterceptor`, which forwards the current id as `X-Correlation-Id`.
+- **Across the outbox:** delivery runs later on a scheduler thread, so `TransactionService` stores the request's id in `outbox_event.correlation_id` (V6) and `OutboxPublisher` restores it, along with `outboxEventId` and `transactionId`, around each delivery. A `POST /transactions` and the balance adjustment account-service applies for it therefore log under one id. Rows from before V6 get a fresh id per attempt.
+- **Format:** `LOG_FORMAT=text` (default; Boot's pattern with a `[correlationId]` slot) or `json` (one logstash-logback-encoder object per line, with `service`, `level`, `logger_name`, `message`, `stack_trace` and all MDC fields at the top level). Both Dockerfiles set `LOG_FORMAT=json`, so Docker Compose and CloudWatch get JSON. Find one request in CloudWatch Logs Insights with `filter correlationId = "<id>"` across both services' log groups.
+
 ---
 
 ### Security (both services)
@@ -296,6 +305,7 @@ transactions.outbox_event                             -- V3
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()   -- V4: due time; lease / backoff
   last_error     TEXT                                  -- V4: latest failure, ≤1000 chars
   failed_at      TIMESTAMPTZ                           -- V4: parked; never retried
+  correlation_id VARCHAR(128)                          -- V6: id of the request that wrote it
   INDEX (next_attempt_at, created_at) WHERE published_at IS NULL AND failed_at IS NULL
 ```
 
@@ -323,7 +333,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.common.error.AccountNotActiveException;
 import com.ledgerwatch.common.error.InsufficientFundsException;
+import com.ledgerwatch.common.logging.CorrelationId;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.client.AccountServiceConflictException;
 import com.ledgerwatch.transactionservice.client.AccountServiceUnavailableException;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.NoSuchElementException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Component;
@@ -59,6 +61,8 @@ public class OutboxPublisher {
 
   private static final Logger log = LoggerFactory.getLogger(OutboxPublisher.class);
   static final int MAX_ERROR_LENGTH = 1000;
+  static final String MDC_EVENT_ID = "outboxEventId";
+  static final String MDC_TRANSACTION_ID = "transactionId";
 
   private final OutboxEventRepository repo;
   private final TransactionRepository transactionRepo;
@@ -141,8 +145,20 @@ public class OutboxPublisher {
   /**
    * Delivers one event and stores the outcome. Returns false, storing nothing, if the circuit
    * breaker refused the call.
+   *
+   * <p>Runs under the correlation id of the request that wrote the event, so this delivery's logs,
+   * and account-service's (the id is forwarded on the call), trace back to that request.
    */
   private boolean publish(OutboxEvent event) {
+    try (CorrelationId.Scope scope = CorrelationId.open(event.getCorrelationId());
+        MDC.MDCCloseable eventId = MDC.putCloseable(MDC_EVENT_ID, String.valueOf(event.getId()));
+        MDC.MDCCloseable txId =
+            MDC.putCloseable(MDC_TRANSACTION_ID, String.valueOf(event.getAggregateId()))) {
+      return deliverAndRecord(event);
+    }
+  }
+
+  private boolean deliverAndRecord(OutboxEvent event) {
     try {
       deliver(event);
     } catch (CallNotPermittedException e) {

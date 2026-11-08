@@ -50,13 +50,27 @@ public class OutboxEvent {
   @Column(name = "failed_at")
   private Instant failedAt;
 
+  /** Correlation id of the request that wrote the event, carried across to its delivery. */
+  @Column(name = "correlation_id", updatable = false, length = 128)
+  private String correlationId;
+
   protected OutboxEvent() {}
 
   public OutboxEvent(String aggregateType, UUID aggregateId, String eventType, String payload) {
+    this(aggregateType, aggregateId, eventType, payload, null);
+  }
+
+  public OutboxEvent(
+      String aggregateType,
+      UUID aggregateId,
+      String eventType,
+      String payload,
+      String correlationId) {
     this.aggregateType = aggregateType;
     this.aggregateId = aggregateId;
     this.eventType = eventType;
     this.payload = payload;
+    this.correlationId = correlationId;
   }
 
   /** Holds the event until {@code until}, so other publishers skip it while it's being sent. */
@@ -125,5 +139,9 @@ public class OutboxEvent {
 
   public Instant getFailedAt() {
     return failedAt;
+  }
+
+  public String getCorrelationId() {
+    return correlationId;
   }
 }

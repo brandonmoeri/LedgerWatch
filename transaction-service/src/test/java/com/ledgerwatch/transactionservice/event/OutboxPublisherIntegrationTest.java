@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.ledgerwatch.common.logging.CorrelationId;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
@@ -137,6 +138,20 @@ class OutboxPublisherIntegrationTest {
     publisher.publishPending();
 
     accountService.verify(1, anyRequestedFor(anyUrl()));
+  }
+
+  @Test
+  void eventWithoutACorrelationId_isStillDeliveredWithOne() throws Exception {
+    // Rows written before V6 have no correlation id; delivery mints one rather than sending none.
+    Pending pending = pendingEvent(TransactionType.CREDIT, "1.00");
+    stubAdjustment(pending.accountId(), 200);
+
+    publisher.publishPending();
+
+    String sent =
+        accountService.getAllServeEvents().get(0).getRequest().getHeader(CorrelationId.HEADER);
+    assertThat(CorrelationId.isValid(sent)).isTrue();
+    assertThat(CorrelationId.current()).as("MDC is cleared after the poll").isNull();
   }
 
   @Test

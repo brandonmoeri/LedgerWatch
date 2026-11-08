@@ -24,5 +24,7 @@ COPY --from=extract --chown=spring:spring /workspace/account-service/target/spri
 COPY --from=extract --chown=spring:spring /workspace/account-service/target/snapshot-dependencies/ ./
 COPY --from=extract --chown=spring:spring /workspace/account-service/target/application/ ./
 USER spring:spring
+# One JSON object per log line for CloudWatch / docker logs; see common's logback-spring.xml.
+ENV LOG_FORMAT=json
 EXPOSE 8081
 ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]

@@ -1,9 +1,11 @@
 package com.ledgerwatch.accountservice.controller;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.ledgerwatch.accountservice.TestcontainersConfiguration;
+import com.ledgerwatch.common.logging.CorrelationId;
 import com.nimbusds.jose.JWSAlgorithm;
 import com.nimbusds.jose.JWSHeader;
 import com.nimbusds.jose.crypto.MACSigner;
@@ -48,6 +50,15 @@ public class JwtSecurityIntegrationTest {
   @Test
   void noToken_returns401() throws Exception {
     mockMvc.perform(get("/accounts")).andExpect(status().isUnauthorized());
+  }
+
+  @Test
+  void correlationId_isEchoed_evenWhenSecurityRejectsTheRequest() throws Exception {
+    // The correlation filter runs ahead of Spring Security, so 401s carry the id too.
+    mockMvc
+        .perform(get("/accounts").header(CorrelationId.HEADER, "upstream-7"))
+        .andExpect(status().isUnauthorized())
+        .andExpect(header().string(CorrelationId.HEADER, "upstream-7"));
   }
 
   @Test
