@@ -9,6 +9,15 @@ locals {
       valueFrom = secret.key != null ? "${secret.arn}:${secret.key}::" : secret.arn
     }
   ]
+
+  publishes_metrics = var.metrics_namespace != null
+
+  # Read by the service's CloudWatchMetricsConfig; AWS_REGION is for the SDK.
+  environment = merge(var.environment, local.publishes_metrics ? {
+    METRICS_CLOUDWATCH_ENABLED   = "true"
+    METRICS_CLOUDWATCH_NAMESPACE = var.metrics_namespace
+    AWS_REGION                   = var.aws_region
+  } : {})
 }
 
 resource "aws_ecr_repository" "this" {
@@ -57,6 +66,46 @@ resource "aws_iam_role_policy" "read_secrets" {
       Effect   = "Allow"
       Action   = "secretsmanager:GetSecretValue"
       Resource = distinct([for secret in values(var.secrets) : secret.arn])
+    }]
+  })
+}
+
+# The role the application itself runs as (the execution role above is ECS's,
+# for pulling the image and reading secrets). Only needed to publish metrics.
+resource "aws_iam_role" "task" {
+  count = local.publishes_metrics ? 1 : 0
+  name  = "${local.name}-task"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ecs-tasks.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+# PutMetricData has no resource-level permissions; the namespace condition is
+# what keeps the task to its own metrics.
+resource "aws_iam_role_policy" "put_metrics" {
+  count = local.publishes_metrics ? 1 : 0
+  name  = "${local.name}-put-metrics"
+  role  = aws_iam_role.task[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = "cloudwatch:PutMetricData"
+      Resource = "*"
+      Condition = {
+        StringEquals = {
+          "cloudwatch:namespace" = var.metrics_namespace
+        }
+      }
     }]
   })
 }
@@ -130,6 +179,7 @@ resource "aws_ecs_task_definition" "this" {
   cpu                      = var.cpu
   memory                   = var.memory
   execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = local.publishes_metrics ? aws_iam_role.task[0].arn : null
 
   container_definitions = jsonencode([
     {
@@ -140,7 +190,7 @@ resource "aws_ecs_task_definition" "this" {
         containerPort = var.container_port
         protocol      = "tcp"
       }]
-      environment = [for name, value in var.environment : { name = name, value = value }]
+      environment = [for name, value in local.environment : { name = name, value = value }]
       secrets     = local.container_secrets
       logConfiguration = {
         logDriver = "awslogs"

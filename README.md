@@ -167,7 +167,7 @@ The stack has three states, and the right one depends on whether anyone needs to
 
 | State | Cost | Live URL | Time to full service |
 |---|---|---|---|
-| **Running** | ~$88/mo (~$2.90/day) | Works | — |
+| **Running** | ~$90/mo (~$2.95/day) | Works | — |
 | **Paused** (tasks at 0, RDS stopped) | ~$28/mo | Same URL; the SPA loads but every API call fails | ~10 min |
 | **Torn down** | < $0.10/mo | Gone; a new CloudFront URL is created on the next bring-up | ~30 min, partly manual |
 
@@ -182,9 +182,10 @@ These are us-east-1 on-demand list prices with no free tier, at 730 hours a mont
 | Application Load Balancer | ~$17 | ~$17 | Hourly charge plus a near-idle LCU charge. Doesn't scale down: this is the floor while the stack exists |
 | RDS `db.t4g.micro` + 20 GB gp3 | $13.98 | $2.30 | Compute $11.68 + storage $2.30. A stopped instance is billed for storage only |
 | Secrets Manager (2 secrets), Cloud Map / Route 53 private zone, ECR, CloudWatch Logs | ~$2 | ~$2 | ECR grows with every deploy's `:<sha>` tag (no lifecycle policy yet) |
+| CloudWatch custom metrics (7) + `PutMetricData` | ~$2.55 | $0 | $0.30 per metric plus one request a minute per task ($0.44). Only `ledgerwatch.*` meters are shipped; Boot's own would add a few hundred. Billed only for hours a task is pushing |
 | S3 + CloudFront | ~$0 | ~$0 | Within CloudFront's always-free tier |
 | Terraform state bucket | < $0.10 | < $0.10 | Survives teardown (`prevent_destroy`) |
-| **Total** | **~$88** | **~$28** | |
+| **Total** | **~$90** | **~$28** | |
 
 A rolling deploy briefly runs a third task, which costs fractions of a cent. To check the estimate against the bill, look at Cost Explorer grouped by service.
 

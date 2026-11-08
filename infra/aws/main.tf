@@ -129,6 +129,9 @@ module "transaction_service" {
   container_port = 8082
   secrets        = local.service_secrets
 
+  # ledgerwatch.transactions.* and ledgerwatch.outbox.* (see the service's TransactionMetrics).
+  metrics_namespace = "LedgerWatch"
+
   load_balancer = {
     target_group_arn = module.alb.target_group_arns["transaction-service"]
   }

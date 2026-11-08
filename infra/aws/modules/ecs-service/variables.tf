@@ -102,3 +102,9 @@ variable "admin_cidr" {
   type        = string
   default     = ""
 }
+
+variable "metrics_namespace" {
+  description = "CloudWatch namespace the service pushes its metrics to. Creates a task role allowed to write only there, and sets METRICS_CLOUDWATCH_ENABLED/NAMESPACE and AWS_REGION. Leave null to publish none."
+  type        = string
+  default     = null
+}

@@ -1,6 +1,7 @@
 package com.ledgerwatch.transactionservice.event;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.*;
@@ -15,10 +16,12 @@ import com.ledgerwatch.transactionservice.client.AccountServiceUnavailableExcept
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
+import com.ledgerwatch.transactionservice.metrics.TransactionMetrics;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Duration;
@@ -55,11 +58,13 @@ class OutboxPublisherTest {
 
   private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
   private CircuitBreakerRegistry circuitBreakerRegistry;
+  private SimpleMeterRegistry meterRegistry;
   private OutboxPublisher publisher;
 
   @BeforeEach
   void setUp() {
     circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults();
+    meterRegistry = new SimpleMeterRegistry();
     publisher =
         new OutboxPublisher(
             repo,
@@ -69,7 +74,29 @@ class OutboxPublisherTest {
             TransactionOperations.withoutTransaction(),
             objectMapper,
             PROPERTIES,
+            new TransactionMetrics(meterRegistry),
             Clock.fixed(NOW, ZoneOffset.UTC));
+  }
+
+  private double posted(TransactionType type) {
+    return meterRegistry.get(TransactionMetrics.POSTED).tag("type", type.name()).counter().count();
+  }
+
+  private double rejected(TransactionRejectionReason reason) {
+    return meterRegistry
+        .get(TransactionMetrics.REJECTED)
+        .tag("reason", reason.name())
+        .counter()
+        .count();
+  }
+
+  private double settledTotal() {
+    return meterRegistry.get(TransactionMetrics.POSTED).counters().stream()
+            .mapToDouble(c -> c.count())
+            .sum()
+        + meterRegistry.get(TransactionMetrics.REJECTED).counters().stream()
+            .mapToDouble(c -> c.count())
+            .sum();
   }
 
   private OutboxEvent event(UUID transactionId, UUID accountId, TransactionType type, String amt)
@@ -318,5 +345,71 @@ class OutboxPublisherTest {
 
     verify(repo, never()).lockDue(any(), anyInt());
     verifyNoInteractions(accountServiceClient);
+  }
+
+  @Test
+  void posted_isCountedByType() throws Exception {
+    OutboxEvent debit = event(UUID.randomUUID(), UUID.randomUUID(), TransactionType.DEBIT, "1.00");
+    OutboxEvent credit =
+        event(UUID.randomUUID(), UUID.randomUUID(), TransactionType.CREDIT, "1.00");
+    due(debit, credit);
+    when(transactionRepo.markPosted(any(), any())).thenReturn(1);
+
+    publisher.publishPending();
+
+    assertThat(posted(TransactionType.DEBIT)).isEqualTo(1);
+    assertThat(posted(TransactionType.CREDIT)).isEqualTo(1);
+    assertThat(rejected(TransactionRejectionReason.INSUFFICIENT_FUNDS)).isZero();
+  }
+
+  @Test
+  void redeliveryOfAnAlreadySettledTransaction_isNotCountedAgain() throws Exception {
+    due(event());
+    when(transactionRepo.markPosted(any(), any())).thenReturn(0);
+
+    publisher.publishPending();
+
+    assertThat(settledTotal()).isZero();
+  }
+
+  @Test
+  void rejected_isCountedByReason() throws Exception {
+    due(event());
+    doThrow(new InsufficientFundsException(UUID.randomUUID(), new BigDecimal("10.00")))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any(), any());
+    when(transactionRepo.markRejected(any(), any(), any())).thenReturn(1);
+
+    publisher.publishPending();
+
+    assertThat(rejected(TransactionRejectionReason.INSUFFICIENT_FUNDS)).isEqualTo(1);
+    assertThat(rejected(TransactionRejectionReason.ACCOUNT_NOT_FOUND)).isZero();
+    assertThat(posted(TransactionType.CREDIT)).isZero();
+  }
+
+  @Test
+  void settlementThatFailsToCommit_isNotCounted() throws Exception {
+    due(event());
+    when(transactionRepo.markPosted(any(), any())).thenReturn(1);
+    when(repo.save(any())).thenThrow(new IllegalStateException("connection lost"));
+
+    assertThatThrownBy(publisher::publishPending).isInstanceOf(IllegalStateException.class);
+
+    assertThat(settledTotal()).isZero();
+  }
+
+  @Test
+  void transientFailureAndParkedEvents_areNeitherPostedNorRejected() throws Exception {
+    OutboxEvent unavailable = event();
+    OutboxEvent forbidden = event();
+    due(unavailable, forbidden);
+    doThrow(new AccountServiceUnavailableException("down"))
+        .doThrow(new AccountServiceException("account-service returned 403"))
+        .when(accountServiceClient)
+        .applyBalanceDelta(any(), any(), any());
+
+    publisher.publishPending();
+
+    assertThat(settledTotal()).isZero();
   }
 }
