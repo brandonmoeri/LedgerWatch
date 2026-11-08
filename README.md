@@ -10,7 +10,7 @@ A banking microservice platform for tracking accounts and transactions, built as
 | `transaction-service` (Spring Boot 3.3, Java 21) | **Functional** — full transaction CRUD REST API, JPA persistence, validation, unit + integration tests |
 | Postgres + both services (local, via Docker Compose) | Running — `accounts` and `transactions` schemas owned by per-service Flyway migrations |
 | React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create, and transactions pages; Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
-| CI/CD | **CI functional** — GitHub Actions on PRs to `master`/`dev`: path-filtered per-service Spotless check + `mvn verify` (JaCoCo 70% coverage gate), frontend type check + lint + Vitest; Docker images published to GHCR on push to `dev`. Deployment (CD) not started |
+| CI/CD | **CI functional** — GitHub Actions on PRs to `master`/`dev`: path-filtered per-service Spotless check + `mvn verify` (JaCoCo 70% coverage gate), frontend type check + lint + Vitest; Docker images published to GHCR on push to `dev`. AWS access from Actions via OIDC (no stored keys); deployment (CD) not started |
 | AWS infra | IaC ready (Terraform modules, `infra/aws/`) for both services on ECS Fargate + RDS. `account-service` was deployed and CRUD-verified on the earlier single-service config, then torn down; the two-service config has been planned but not yet applied |
 
 ## Architecture
@@ -88,7 +88,7 @@ Terraform state lives in S3 (`ledgerwatch/terraform.tfstate`), so it survives a 
 Do this once per AWS account, from `infra/aws/`:
 
 ```bash
-# 1. Grant your IAM user access to the state bucket (needs IAM admin rights).
+# 1. Grant your IAM user access to the state bucket and the GitHub OIDC resources (needs IAM admin rights).
 aws iam put-user-policy --user-name <your-iam-user> --policy-name ledgerwatch-tfstate --policy-document file://bootstrap/operator-policy.json
 
 # 2. Create the bucket: ledgerwatch-tfstate-<account-id>
@@ -106,6 +106,18 @@ rm terraform.tfstate*
 On a new machine or clone, skip all of that and pass the bucket name directly: `terraform init -backend-config="bucket=ledgerwatch-tfstate-<account-id>"`. The bootstrap's local state isn't needed for normal use. If it's lost, `terraform -chdir=bootstrap import aws_s3_bucket.state <bucket>` recovers the bucket, and the same goes for the other resources in `bootstrap/main.tf`.
 
 If a crashed run leaves a stale lock, `terraform force-unlock <lock-id>` clears it (the ID is in the error message). To undo a bad state write, restore an earlier object version: they're kept for 90 days.
+
+### CI access (GitHub OIDC)
+
+The bootstrap also creates a GitHub OIDC identity provider and a `ledgerwatch-github-deploy` IAM role, so GitHub Actions gets short-lived AWS credentials and no access keys are stored in the repo. Only workflows triggered by a push to `master` or `dev` in this repo can assume the role; pull requests can't. Its permissions cover the deploy steps below (ECR push, ECS service rollout, S3 upload, CloudFront invalidation), not `terraform apply`. See [ARCHITECTURE.md](ARCHITECTURE.md#ci-access-to-aws-github-oidc) for the trust policy.
+
+After `terraform -chdir=bootstrap apply`, store the role ARN as a repository **variable** (Settings → Secrets and variables → Actions → Variables). It isn't a secret:
+
+```bash
+terraform -chdir=bootstrap output -raw github_deploy_role_arn   # → AWS_DEPLOY_ROLE_ARN
+```
+
+To check it end to end, run the **AWS OIDC Check** workflow from the Actions tab on `master` or `dev`. It should print the assumed-role ARN.
 
 ### Deploying
 

@@ -434,6 +434,14 @@ State is stored in S3 at `ledgerwatch/terraform.tfstate`, with S3 native locking
 
 State contains the DB password and JWT key in plaintext, so the bucket blocks public access, encrypts with SSE-S3, denies non-TLS requests and sets `prevent_destroy`. Versioning keeps superseded state for 90 days as the recovery path. The backend block is a partial config: the bucket name is passed at `terraform init` so the account ID stays out of the repo. Bootstrap steps are in the README.
 
+### CI access to AWS (GitHub OIDC)
+
+GitHub Actions authenticates to AWS with short-lived credentials from GitHub's OIDC token, so no AWS access keys are stored as repo secrets. `infra/aws/bootstrap/github-oidc.tf` creates the account's `token.actions.githubusercontent.com` identity provider and the `ledgerwatch-github-deploy` role. Like the state bucket, these live in the bootstrap config because CI needs them before it can run anything, and destroying the app stack must not remove them.
+
+The role's trust policy requires `aud = sts.amazonaws.com` and an exact `sub` match (`StringEquals`, no wildcards) on `repo:brandonmoeri/LedgerWatch:ref:refs/heads/<branch>` for each branch in `github_deploy_branches` (default `master`, `dev`). Pull-request runs (`sub` ends in `:pull_request`), other branches, tags and other repos can't assume it. A workflow needs `permissions: id-token: write` and `aws-actions/configure-aws-credentials` with `role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}`. `.github/workflows/aws-oidc-check.yml` is a manual smoke test that runs `aws sts get-caller-identity`.
+
+The role's permissions cover the README's manual deploy steps, apart from Terraform itself: push to the `ledgerwatch/*` ECR repos, `UpdateService`/`DescribeServices` on the `ledgerwatch-*` services in `ledgerwatch-cluster`, write to the frontend bucket, and create CloudFront invalidations. Running `terraform apply` from CI would need much broader IAM rights and isn't granted.
+
 ### Terraform outputs
 
 `alb_url`, `frontend_url`, `frontend_bucket`, `frontend_distribution_id`, `ecr_repository_urls` and `ecs_service_names` (maps keyed by service), `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `db_secret_arn`, `db_password` (sensitive).

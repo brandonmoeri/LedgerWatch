@@ -15,3 +15,15 @@ variable "noncurrent_version_retention_days" {
   type        = number
   default     = 90
 }
+
+variable "github_repository" {
+  description = "GitHub repo (owner/name, exact case) whose workflows may assume the deploy role"
+  type        = string
+  default     = "brandonmoeri/LedgerWatch"
+}
+
+variable "github_deploy_branches" {
+  description = "Branches whose push-triggered workflows may assume the deploy role"
+  type        = list(string)
+  default     = ["master", "dev"]
+}
