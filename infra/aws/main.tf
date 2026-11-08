@@ -79,6 +79,15 @@ module "alb" {
   }
 }
 
+# The SPA from S3, with /api/* proxied to the ALB, so the browser sees one origin
+# (no CORS) exactly as with the Vite dev proxy.
+module "frontend" {
+  source = "./modules/frontend"
+
+  project           = var.project
+  api_origin_domain = module.alb.dns_name
+}
+
 module "account_service" {
   source = "./modules/ecs-service"
 

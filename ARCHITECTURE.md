@@ -39,7 +39,7 @@ LedgerWatch/
 ├── docker-compose.yml             # Postgres 16 + account-service + transaction-service
 ├── docs/adr/                      # Architecture decision records
 ├── .env.example                   # DB_* and JWT_SECRET template
-└── infra/aws/                     # Terraform — both services on ECS/RDS (network, ecs-service, rds modules)
+└── infra/aws/                     # Terraform — services on ECS/RDS, SPA on S3 + CloudFront
 ```
 
 ---
@@ -339,7 +339,7 @@ Each service owns its schema through Flyway. On startup, Spring Boot's Flyway au
 | `account-service` | `account-service/Dockerfile` | `8081` | Waits for `postgres` to be healthy; `DB_URL` points at `postgres:5432` |
 | `transaction-service` | `transaction-service/Dockerfile` | `8082` | Same as above; `ACCOUNT_SERVICE_URL` points at `account-service:8081` |
 
-Both services read `JWT_SECRET` from the host environment or `.env` (copy `.env.example`). Flyway migrates each schema when its service starts. The SPA is not containerized; run it with Vite (see below).
+Both services read `JWT_SECRET` from the host environment or `.env` (copy `.env.example`). Flyway migrates each schema when its service starts. The SPA is not containerized; run it with Vite locally (see below). In AWS it's served from S3 through CloudFront (see [Infrastructure](#infrastructure-aws)).
 
 ---
 
@@ -386,13 +386,14 @@ Vitest + jsdom + `@testing-library/react`. Test setup in `src/test/setup.ts`.
 
 ## Infrastructure (AWS)
 
-Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service and transaction-service**. The root module wires four local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
+Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service, transaction-service and the React SPA**. The root module wires five local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
 
 | Module | Owns |
 |---|---|
 | `modules/network` | VPC, internet gateway, public subnets, route table |
 | `modules/rds` | Postgres instance, subnet group, security group, DB credentials secret |
 | `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service |
+| `modules/frontend` | Private S3 bucket for the SPA build, CloudFront distribution (S3 + ALB origins), origin access control, two CloudFront Functions |
 | `modules/ecs-service` | One service: ECR repository, log group, execution role, security group, Cloud Map record, task definition, ECS service |
 
 The two services are separate `ecs-service` module calls rather than a `for_each`, because they reference each other: account-service allows ingress from transaction-service's security group, and transaction-service reads account-service's internal URL.
@@ -408,6 +409,9 @@ The two services are separate `ecs-service` module calls rather than a `for_each
 | **ECS Tasks** | Fargate, 0.5 vCPU / 1 GB each, container ports `8081` and `8082`, logs to CloudWatch (`/ecs/ledgerwatch-<service>`, 3-day retention) |
 | **ECS Services** | `desired_count = 1` each, public IP assigned directly, registered with the ALB; a 180-second health check grace period covers startup |
 | **ALB** | Internet-facing, HTTP on port `80`. `/accounts`, `/accounts/*`, `/auth`, `/auth/*` → account-service; `/transactions*` → transaction-service; anything else → fixed `404`. Target groups use IP targets and check `/actuator/health` every 30 seconds |
+| **S3 (frontend)** | `ledgerwatch-frontend-<account-id>`: all public access blocked, SSE-S3, bucket-owner-enforced. The bucket policy lets only this distribution read it (OAC, `AWS:SourceArn` condition) |
+| **CloudFront** | One distribution, HTTPS with the default `*.cloudfront.net` certificate, `PriceClass_100`. Default behavior → S3 with `Managed-CachingOptimized`. `/api/*` → ALB over HTTP with `Managed-CachingDisabled` and `Managed-AllViewerExceptHostHeader`, all methods |
+| **CloudFront Functions** | `spa-rewrite` (viewer request, default behavior): paths whose last segment has no `.` are rewritten to `/index.html`, so React Router deep links work. `api-strip-prefix` (viewer request, `/api/*`): `/api/accounts` → `/accounts`, mirroring the Vite proxy |
 | **Cloud Map** | Private DNS namespace `ledgerwatch.local`; transaction-service calls `http://account-service.ledgerwatch.local:8081` via `ACCOUNT_SERVICE_URL` |
 | **RDS** | Postgres 16, `db.t4g.micro`, 20 GB gp3, single-AZ, publicly accessible, no final snapshot |
 | **Secrets Manager** | `ledgerwatch/db` stores `url`, `username`, `password` JSON; `ledgerwatch/jwt` stores the shared HMAC key. Each service's task execution role reads them at startup |
@@ -417,7 +421,9 @@ The two services are separate `ecs-service` module calls rather than a `for_each
 
 - **No NAT Gateway** — cost-minimized; ECS tasks get public IPs directly, though only the ALB, sibling services and `admin_cidr` can reach them.
 - **ALB default action is a `404`** — routes are an allowlist, so `/internal/*`, `/actuator/*` and Swagger stay off the public endpoint.
-- **HTTP only** — there's no domain or ACM certificate yet, so credentials and JWTs cross the internet unencrypted. Add an HTTPS listener before putting real data behind this.
+- **HTTPS at the edge, HTTP to the ALB.** Browsers reach CloudFront over HTTPS, but the CloudFront → ALB hop and direct ALB access are plain HTTP because there's no domain or ACM certificate yet. Credentials and JWTs therefore still cross the internet unencrypted between AWS edge locations and the ALB. Add an HTTPS listener (and restrict the ALB security group to the `com.amazonaws.global.cloudfront.origin-facing` prefix list) before putting real data behind this.
+- **SPA fallback via a CloudFront Function, not `custom_error_response`.** Custom error responses apply to the whole distribution, so a 403→`/index.html` mapping would also replace the API's 401/403/404 `problem+json` bodies with HTML. Rewriting only extensionless paths on the S3 behavior leaves API errors alone. The bucket policy also grants `s3:ListBucket`, so a missing asset returns a real 404 instead of an S3 403.
+- **Same-origin API.** Serving the SPA and `/api/*` from one CloudFront hostname keeps the `baseURL: '/api'` client unchanged between dev and prod, and needs no CORS config on the services. `Authorization` can't be listed alone in an origin request policy; with caching disabled, the all-viewer-headers policy is what carries it to the ALB on GETs (the README deploy steps check this).
 - **RDS is publicly accessible** with a randomly generated 24-char password; access is locked to the service security groups (and optionally a one-time admin CIDR for schema seeding).
 - `backup_retention_period = 0` and `skip_final_snapshot = true` — this deployment is torn down after smoke-test verification.
 - DB credentials are injected into the container as secrets using the ECS `secrets` field (resolves individual JSON keys from the Secrets Manager ARN at task startup).
@@ -430,7 +436,7 @@ State contains the DB password and JWT key in plaintext, so the bucket blocks pu
 
 ### Terraform outputs
 
-`alb_url`, `ecr_repository_urls` and `ecs_service_names` (maps keyed by service), `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `db_secret_arn`, `db_password` (sensitive).
+`alb_url`, `frontend_url`, `frontend_bucket`, `frontend_distribution_id`, `ecr_repository_urls` and `ecs_service_names` (maps keyed by service), `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `db_secret_arn`, `db_password` (sensitive).
 
 ---
 

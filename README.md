@@ -34,7 +34,7 @@ LedgerWatch/
 ├── frontend/                 # React/TS SPA — Vite, Redux Toolkit, React Router
 ├── docker/postgres/init.sql  # Schema seed (accounts + transactions schemas)
 ├── docker-compose.yml        # Postgres + account-service + transaction-service
-├── infra/aws/                # Terraform — AWS deployment (network, ecs-service, rds modules)
+├── infra/aws/                # Terraform — AWS deployment (network, alb, ecs-service, rds, frontend modules)
 └── pom.xml                   # Maven parent (Java 21, Spring Boot 3.3.4)
 ```
 
@@ -79,7 +79,7 @@ Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`,
 
 ## AWS deployment
 
-Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. An Application Load Balancer is the public entry point: `/accounts` and `/auth` go to `account-service`, `/transactions*` to `transaction-service`, and any other path gets a 404, so `/internal/*` isn't exposed. It listens on plain HTTP only. `transaction-service` reaches `account-service` over Cloud Map private DNS. No NAT Gateway (cost-minimized).
+Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. An Application Load Balancer is the public entry point: `/accounts` and `/auth` go to `account-service`, `/transactions*` to `transaction-service`, and any other path gets a 404, so `/internal/*` isn't exposed. It listens on plain HTTP only. The React SPA is served from a private S3 bucket through CloudFront over HTTPS. CloudFront also forwards `/api/*` to the ALB with the `/api` prefix stripped, the same as the Vite dev proxy, so the browser talks to a single origin and no CORS is needed. `transaction-service` reaches `account-service` over Cloud Map private DNS. No NAT Gateway (cost-minimized).
 
 ### Remote state
 
@@ -128,9 +128,28 @@ terraform apply -var "admin_cidr=<your-ip>/32"
 curl -i "$(terraform output -raw alb_url)/accounts"  # 401 from account-service means routing works
 ```
 
+Then publish the SPA (from the repo root). Hashed assets are cached for a year; `index.html` is revalidated on every request, so a new deploy is visible without waiting on the CDN:
+
+```bash
+(cd frontend && npm ci && npm run build)
+BUCKET=$(terraform -chdir=infra/aws output -raw frontend_bucket)
+aws s3 sync frontend/dist "s3://$BUCKET" --delete --exclude index.html --cache-control "public,max-age=31536000,immutable"
+aws s3 cp frontend/dist/index.html "s3://$BUCKET/index.html" --cache-control "no-cache"
+
+URL=$(terraform -chdir=infra/aws output -raw frontend_url)   # new distributions take a few minutes to deploy
+curl -sI "$URL/accounts/does-not-matter" | head -1        # 200: SPA fallback serves index.html
+curl -s  "$URL/api/accounts" -o /dev/null -w '%{http_code}
+'  # 401: /api reaches account-service
+TOKEN=$(curl -s "$URL/api/auth/login" -H 'Content-Type: application/json' -d '{"username":"analyst","password":"analyst123"}' | jq -r .token)
+curl -s "$URL/api/accounts" -H "Authorization: Bearer $TOKEN" -o /dev/null -w '%{http_code}
+'  # 200: Authorization survives CloudFront on GET
+```
+
+`aws s3 sync --delete` removes the old hashed bundles; a cached `index.html` from a previous deploy can't outlive its `no-cache` revalidation, so no invalidation is needed. If you ever upload without those headers, run `aws cloudfront create-invalidation --distribution-id "$(terraform -chdir=infra/aws output -raw frontend_distribution_id)" --paths '/*'`.
+
 **Tearing down** (stops all billing): `terraform destroy -var "admin_cidr=<your-ip>/32"` from `infra/aws/`. This leaves the state bucket in place: it costs pennies a month and has `prevent_destroy` set. The resources above are not currently running; this is the reproducible path to bring them back up.
 
-Approximate cost if left running continuously: ~$2.15/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo, ALB ~$17/mo).
+Approximate cost if left running continuously: ~$2.15/day (RDS ~$12-13/mo, two Fargate tasks ~$36/mo, ALB ~$17/mo). S3 + CloudFront is pennies at portfolio traffic (within the free tier).
 
 ## Running tests
 
