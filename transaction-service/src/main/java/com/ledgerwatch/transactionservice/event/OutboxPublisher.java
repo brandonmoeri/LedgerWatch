@@ -4,11 +4,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.common.error.AccountNotActiveException;
 import com.ledgerwatch.common.error.InsufficientFundsException;
+import com.ledgerwatch.common.logging.CorrelationId;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.client.AccountServiceConflictException;
 import com.ledgerwatch.transactionservice.client.AccountServiceUnavailableException;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
+import com.ledgerwatch.transactionservice.domain.TransactionType;
+import com.ledgerwatch.transactionservice.metrics.TransactionMetrics;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
@@ -19,8 +22,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.function.IntSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.stereotype.Component;
@@ -52,6 +57,10 @@ import org.springframework.transaction.support.TransactionOperations;
  * delivering but before that commits, redelivery replays the adjustment and settles it then. While
  * the {@code accountService} circuit breaker is open, polls are skipped, and events claimed when it
  * trips are released untouched.
+ *
+ * <p>{@link TransactionMetrics} counts a transaction as posted or rejected once that update has
+ * committed, and only if it moved the transaction out of PENDING, so a redelivery doesn't count it
+ * twice.
  */
 @Component
 @EnableConfigurationProperties(OutboxPublisherProperties.class)
@@ -59,6 +68,8 @@ public class OutboxPublisher {
 
   private static final Logger log = LoggerFactory.getLogger(OutboxPublisher.class);
   static final int MAX_ERROR_LENGTH = 1000;
+  static final String MDC_EVENT_ID = "outboxEventId";
+  static final String MDC_TRANSACTION_ID = "transactionId";
 
   private final OutboxEventRepository repo;
   private final TransactionRepository transactionRepo;
@@ -67,6 +78,7 @@ public class OutboxPublisher {
   private final TransactionOperations transactions;
   private final ObjectMapper objectMapper;
   private final OutboxPublisherProperties properties;
+  private final TransactionMetrics metrics;
   private final Clock clock;
 
   @Autowired
@@ -77,7 +89,8 @@ public class OutboxPublisher {
       CircuitBreakerRegistry circuitBreakerRegistry,
       TransactionOperations transactions,
       ObjectMapper objectMapper,
-      OutboxPublisherProperties properties) {
+      OutboxPublisherProperties properties,
+      TransactionMetrics metrics) {
     this(
         repo,
         transactionRepo,
@@ -86,6 +99,7 @@ public class OutboxPublisher {
         transactions,
         objectMapper,
         properties,
+        metrics,
         Clock.systemUTC());
   }
 
@@ -97,6 +111,7 @@ public class OutboxPublisher {
       TransactionOperations transactions,
       ObjectMapper objectMapper,
       OutboxPublisherProperties properties,
+      TransactionMetrics metrics,
       Clock clock) {
     this.repo = repo;
     this.transactionRepo = transactionRepo;
@@ -105,6 +120,7 @@ public class OutboxPublisher {
     this.transactions = transactions;
     this.objectMapper = objectMapper;
     this.properties = properties;
+    this.metrics = metrics;
     this.clock = clock;
   }
 
@@ -141,10 +157,23 @@ public class OutboxPublisher {
   /**
    * Delivers one event and stores the outcome. Returns false, storing nothing, if the circuit
    * breaker refused the call.
+   *
+   * <p>Runs under the correlation id of the request that wrote the event, so this delivery's logs,
+   * and account-service's (the id is forwarded on the call), trace back to that request.
    */
   private boolean publish(OutboxEvent event) {
+    try (CorrelationId.Scope scope = CorrelationId.open(event.getCorrelationId());
+        MDC.MDCCloseable eventId = MDC.putCloseable(MDC_EVENT_ID, String.valueOf(event.getId()));
+        MDC.MDCCloseable txId =
+            MDC.putCloseable(MDC_TRANSACTION_ID, String.valueOf(event.getAggregateId()))) {
+      return deliverAndRecord(event);
+    }
+  }
+
+  private boolean deliverAndRecord(OutboxEvent event) {
+    TransactionType type;
     try {
-      deliver(event);
+      type = deliver(event);
     } catch (CallNotPermittedException e) {
       return false;
     } catch (AccountServiceUnavailableException | AccountServiceConflictException e) {
@@ -167,11 +196,9 @@ public class OutboxPublisher {
     }
     Instant now = clock.instant();
     event.markPublished(now);
-    transactions.executeWithoutResult(
-        status -> {
-          transactionRepo.markPosted(event.getAggregateId(), now);
-          repo.save(event);
-        });
+    if (settle(event, () -> transactionRepo.markPosted(event.getAggregateId(), now))) {
+      metrics.posted(type);
+    }
     return true;
   }
 
@@ -191,18 +218,33 @@ public class OutboxPublisher {
     Instant now = clock.instant();
     event.markFailed(now, errorMessage(e));
     log.info("Transaction {} rejected ({}): {}", event.getAggregateId(), reason, e.getMessage());
-    transactions.executeWithoutResult(
-        status -> {
-          transactionRepo.markRejected(event.getAggregateId(), reason, now);
-          repo.save(event);
-        });
+    if (settle(event, () -> transactionRepo.markRejected(event.getAggregateId(), reason, now))) {
+      metrics.rejected(reason);
+    }
+  }
+
+  /**
+   * Saves the event and runs {@code markTransaction} in one DB transaction. Returns true once that
+   * has committed if it changed the transaction's status, and false if the transaction had already
+   * left PENDING (a redelivery, or an admin got there first).
+   */
+  private boolean settle(OutboxEvent event, IntSupplier markTransaction) {
+    Integer updated =
+        transactions.execute(
+            status -> {
+              int rows = markTransaction.getAsInt();
+              repo.save(event);
+              return rows;
+            });
+    return updated != null && updated > 0;
   }
 
   /**
    * A {@code TransactionCreated} event becomes a balance adjustment keyed by the transaction id, so
-   * a replay of an applied adjustment is a no-op on account-service's side.
+   * a replay of an applied adjustment is a no-op on account-service's side. Returns the
+   * transaction's type.
    */
-  private void deliver(OutboxEvent event) {
+  private TransactionType deliver(OutboxEvent event) {
     if (!TransactionCreatedEvent.EVENT_TYPE.equals(event.getEventType())) {
       throw new IllegalArgumentException("No delivery for event type " + event.getEventType());
     }
@@ -214,6 +256,7 @@ public class OutboxPublisher {
     }
     accountServiceClient.applyBalanceDelta(
         payload.accountId(), payload.balanceDelta(), payload.transactionId());
+    return payload.type();
   }
 
   private void release(List<OutboxEvent> events) {

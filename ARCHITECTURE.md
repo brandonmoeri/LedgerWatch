@@ -39,7 +39,7 @@ LedgerWatch/
 ├── docker-compose.yml             # Postgres 16 + account-service + transaction-service
 ├── docs/adr/                      # Architecture decision records
 ├── .env.example                   # DB_* and JWT_SECRET template
-└── infra/aws/                     # Terraform — both services on ECS/RDS (network, ecs-service, rds modules)
+└── infra/aws/                     # Terraform — services on ECS/RDS, SPA on S3 + CloudFront
 ```
 
 ---
@@ -74,6 +74,30 @@ A plain jar (no Spring Boot plugin) that both services depend on. It holds `Abst
 | `MethodArgumentNotValidException` | 400, with an `errors` map of field → message |
 
 Each service's `GlobalExceptionHandler` is a `@RestControllerAdvice` that extends it; account-service adds a `BadCredentialsException` → 401 handler for login. Both Dockerfiles build through the Maven reactor (`-pl <service> -am`), so `common` is compiled into each image, and CI rebuilds both services when `common/` changes.
+
+#### Logging and correlation IDs
+
+`common` also auto-configures (via `CorrelationIdAutoConfiguration`) request correlation and ships the shared `logback-spring.xml`:
+
+- **Inbound:** `CorrelationIdFilter` runs ahead of Spring Security on every request (including Boot's `/error` dispatch). It takes the caller's `X-Correlation-Id` if it matches `[A-Za-z0-9._:-]{1,128}`, otherwise mints a UUID, puts it in the SLF4J MDC as `correlationId`, and echoes it in the response header.
+- **Outbound:** every `RestClient` built from Boot's `RestClient.Builder` gets `CorrelationIdInterceptor`, which forwards the current id as `X-Correlation-Id`.
+- **Across the outbox:** delivery runs later on a scheduler thread, so `TransactionService` stores the request's id in `outbox_event.correlation_id` (V6) and `OutboxPublisher` restores it, along with `outboxEventId` and `transactionId`, around each delivery. A `POST /transactions` and the balance adjustment account-service applies for it therefore log under one id. Rows from before V6 get a fresh id per attempt.
+- **Format:** `LOG_FORMAT=text` (default; Boot's pattern with a `[correlationId]` slot) or `json` (one logstash-logback-encoder object per line, with `service`, `level`, `logger_name`, `message`, `stack_trace` and all MDC fields at the top level). Both Dockerfiles set `LOG_FORMAT=json`, so Docker Compose and CloudWatch get JSON. Find one request in CloudWatch Logs Insights with `filter correlationId = "<id>"` across both services' log groups.
+
+#### Metrics (transaction-service)
+
+transaction-service registers its own Micrometer meters, all prefixed `ledgerwatch.`:
+
+| Meter | Type | Tags | Meaning |
+|---|---|---|---|
+| `ledgerwatch.transactions.posted` | Counter | `type` | Transactions settled POSTED |
+| `ledgerwatch.transactions.rejected` | Counter | `reason` | Transactions settled REJECTED (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`) |
+| `ledgerwatch.outbox.lag` | Time gauge (s) | — | Age of the oldest undelivered outbox event; 0 when the outbox is drained |
+| `ledgerwatch.outbox.pending` | Gauge | — | Undelivered outbox events |
+
+- **Counters** (`TransactionMetrics`) are incremented by `OutboxPublisher` after the status update commits, and only if `markPosted`/`markRejected` actually moved the row out of PENDING, so a redelivered event isn't counted twice. Every tag value is registered at startup, so idle series report 0 rather than no data.
+- **Gauges** (`OutboxBacklogMetrics`) query `outbox_event` each time they're sampled. "Undelivered" means neither published nor parked: events backing off after a transient failure count, parked ones don't. Lag is the signal to alarm on: it climbs steadily while account-service is down or the publisher has stalled, even if only one event is waiting.
+- **Export:** with `metrics.cloudwatch.enabled=true`, `CloudWatchMetricsConfig` pushes to CloudWatch every minute (`metrics.cloudwatch.step`) under namespace `LedgerWatch`, with dimension `application=transaction-service`. Boot 3.3 has no CloudWatch auto-configuration, so the registry is declared there. It filters out everything not prefixed `ledgerwatch.`, because CloudWatch bills each name/dimension combination as a custom metric. In CloudWatch, counters appear as `<name>.count` (Sum per minute = transactions settled that minute) and gauges as `<name>.value`. Export is off locally; `GET /actuator/metrics/ledgerwatch.outbox.lag` (ADMIN) shows the same values.
 
 ---
 
@@ -296,6 +320,7 @@ transactions.outbox_event                             -- V3
   next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()   -- V4: due time; lease / backoff
   last_error     TEXT                                  -- V4: latest failure, ≤1000 chars
   failed_at      TIMESTAMPTZ                           -- V4: parked; never retried
+  correlation_id VARCHAR(128)                          -- V6: id of the request that wrote it
   INDEX (next_attempt_at, created_at) WHERE published_at IS NULL AND failed_at IS NULL
 ```
 
@@ -323,7 +348,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.
@@ -339,7 +364,7 @@ Each service owns its schema through Flyway. On startup, Spring Boot's Flyway au
 | `account-service` | `account-service/Dockerfile` | `8081` | Waits for `postgres` to be healthy; `DB_URL` points at `postgres:5432` |
 | `transaction-service` | `transaction-service/Dockerfile` | `8082` | Same as above; `ACCOUNT_SERVICE_URL` points at `account-service:8081` |
 
-Both services read `JWT_SECRET` from the host environment or `.env` (copy `.env.example`). Flyway migrates each schema when its service starts. The SPA is not containerized; run it with Vite (see below).
+Both services read `JWT_SECRET` from the host environment or `.env` (copy `.env.example`). Flyway migrates each schema when its service starts. The SPA is not containerized; run it with Vite locally (see below). In AWS it's served from S3 through CloudFront (see [Infrastructure](#infrastructure-aws)).
 
 ---
 
@@ -386,14 +411,15 @@ Vitest + jsdom + `@testing-library/react`. Test setup in `src/test/setup.ts`.
 
 ## Infrastructure (AWS)
 
-Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service and transaction-service**. The root module wires four local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
+Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service, transaction-service and the React SPA**. The root module wires five local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
 
 | Module | Owns |
 |---|---|
 | `modules/network` | VPC, internet gateway, public subnets, route table |
 | `modules/rds` | Postgres instance, subnet group, security group, DB credentials secret |
 | `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service |
-| `modules/ecs-service` | One service: ECR repository, log group, execution role, security group, Cloud Map record, task definition, ECS service |
+| `modules/frontend` | Private S3 bucket for the SPA build, CloudFront distribution (S3 + ALB origins), origin access control, two CloudFront Functions |
+| `modules/ecs-service` | One service: ECR repository, log group, execution role, optional task role (with `metrics_namespace`), security group, Cloud Map record, task definition, ECS service |
 
 The two services are separate `ecs-service` module calls rather than a `for_each`, because they reference each other: account-service allows ingress from transaction-service's security group, and transaction-service reads account-service's internal URL.
 
@@ -408,8 +434,12 @@ The two services are separate `ecs-service` module calls rather than a `for_each
 | **ECS Tasks** | Fargate, 0.5 vCPU / 1 GB each, container ports `8081` and `8082`, logs to CloudWatch (`/ecs/ledgerwatch-<service>`, 3-day retention) |
 | **ECS Services** | `desired_count = 1` each, public IP assigned directly, registered with the ALB; a 180-second health check grace period covers startup |
 | **ALB** | Internet-facing, HTTP on port `80`. `/accounts`, `/accounts/*`, `/auth`, `/auth/*` → account-service; `/transactions*` → transaction-service; anything else → fixed `404`. Target groups use IP targets and check `/actuator/health` every 30 seconds |
+| **S3 (frontend)** | `ledgerwatch-frontend-<account-id>`: all public access blocked, SSE-S3, bucket-owner-enforced. The bucket policy lets only this distribution read it (OAC, `AWS:SourceArn` condition) |
+| **CloudFront** | One distribution, HTTPS with the default `*.cloudfront.net` certificate, `PriceClass_100`. Default behavior → S3 with `Managed-CachingOptimized`. `/api/*` → ALB over HTTP with `Managed-CachingDisabled` and `Managed-AllViewerExceptHostHeader`, all methods |
+| **CloudFront Functions** | `spa-rewrite` (viewer request, default behavior): paths whose last segment has no `.` are rewritten to `/index.html`, so React Router deep links work. `api-strip-prefix` (viewer request, `/api/*`): `/api/accounts` → `/accounts`, mirroring the Vite proxy |
 | **Cloud Map** | Private DNS namespace `ledgerwatch.local`; transaction-service calls `http://account-service.ledgerwatch.local:8081` via `ACCOUNT_SERVICE_URL` |
 | **RDS** | Postgres 16, `db.t4g.micro`, 20 GB gp3, single-AZ, publicly accessible, no final snapshot |
+| **CloudWatch metrics** | transaction-service pushes 7 custom metrics to namespace `LedgerWatch` once a minute. Its task role (`ledgerwatch-transaction-service-task`) may call `cloudwatch:PutMetricData` only with that namespace (a `cloudwatch:namespace` condition, since the action has no resource-level permissions) |
 | **Secrets Manager** | `ledgerwatch/db` stores `url`, `username`, `password` JSON; `ledgerwatch/jwt` stores the shared HMAC key. Each service's task execution role reads them at startup |
 | **Security groups** | One per service: all egress open; ingress on the container port from the ALB, plus the optional `admin_cidr` variable. account-service also allows `8081` from transaction-service. RDS: inbound `5432` from both service SGs (and optional `admin_cidr`) |
 
@@ -417,7 +447,9 @@ The two services are separate `ecs-service` module calls rather than a `for_each
 
 - **No NAT Gateway** — cost-minimized; ECS tasks get public IPs directly, though only the ALB, sibling services and `admin_cidr` can reach them.
 - **ALB default action is a `404`** — routes are an allowlist, so `/internal/*`, `/actuator/*` and Swagger stay off the public endpoint.
-- **HTTP only** — there's no domain or ACM certificate yet, so credentials and JWTs cross the internet unencrypted. Add an HTTPS listener before putting real data behind this.
+- **HTTPS at the edge, HTTP to the ALB.** Browsers reach CloudFront over HTTPS, but the CloudFront → ALB hop and direct ALB access are plain HTTP because there's no domain or ACM certificate yet. Credentials and JWTs therefore still cross the internet unencrypted between AWS edge locations and the ALB. Add an HTTPS listener (and restrict the ALB security group to the `com.amazonaws.global.cloudfront.origin-facing` prefix list) before putting real data behind this.
+- **SPA fallback via a CloudFront Function, not `custom_error_response`.** Custom error responses apply to the whole distribution, so a 403→`/index.html` mapping would also replace the API's 401/403/404 `problem+json` bodies with HTML. Rewriting only extensionless paths on the S3 behavior leaves API errors alone. The bucket policy also grants `s3:ListBucket`, so a missing asset returns a real 404 instead of an S3 403.
+- **Same-origin API.** Serving the SPA and `/api/*` from one CloudFront hostname keeps the `baseURL: '/api'` client unchanged between dev and prod, and needs no CORS config on the services. `Authorization` can't be listed alone in an origin request policy; with caching disabled, the all-viewer-headers policy is what carries it to the ALB on GETs (the README deploy steps check this).
 - **RDS is publicly accessible** with a randomly generated 24-char password; access is locked to the service security groups (and optionally a one-time admin CIDR for schema seeding).
 - `backup_retention_period = 0` and `skip_final_snapshot = true` — this deployment is torn down after smoke-test verification.
 - DB credentials are injected into the container as secrets using the ECS `secrets` field (resolves individual JSON keys from the Secrets Manager ARN at task startup).
@@ -428,9 +460,17 @@ State is stored in S3 at `ledgerwatch/terraform.tfstate`, with S3 native locking
 
 State contains the DB password and JWT key in plaintext, so the bucket blocks public access, encrypts with SSE-S3, denies non-TLS requests and sets `prevent_destroy`. Versioning keeps superseded state for 90 days as the recovery path. The backend block is a partial config: the bucket name is passed at `terraform init` so the account ID stays out of the repo. Bootstrap steps are in the README.
 
+### CI access to AWS (GitHub OIDC)
+
+GitHub Actions authenticates to AWS with short-lived credentials from GitHub's OIDC token, so no AWS access keys are stored as repo secrets. `infra/aws/bootstrap/github-oidc.tf` creates the account's `token.actions.githubusercontent.com` identity provider and the `ledgerwatch-github-deploy` role. Like the state bucket, these live in the bootstrap config because CI needs them before it can run anything, and destroying the app stack must not remove them.
+
+The role's trust policy requires `aud = sts.amazonaws.com` and an exact `sub` match (`StringEquals`, no wildcards) on `repo:brandonmoeri/LedgerWatch:ref:refs/heads/<branch>` for each branch in `github_deploy_branches` (default `master`, `dev`). Pull-request runs (`sub` ends in `:pull_request`), other branches, tags and other repos can't assume it. A workflow needs `permissions: id-token: write` and `aws-actions/configure-aws-credentials` with `role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}`. `.github/workflows/aws-oidc-check.yml` is a manual smoke test that runs `aws sts get-caller-identity`.
+
+The role's permissions cover the README's manual deploy steps, apart from Terraform itself: push to the `ledgerwatch/*` ECR repos, `UpdateService`/`DescribeServices` on the `ledgerwatch-*` services in `ledgerwatch-cluster`, write to the frontend bucket, and create CloudFront invalidations. Running `terraform apply` from CI would need much broader IAM rights and isn't granted.
+
 ### Terraform outputs
 
-`alb_url`, `ecr_repository_urls` and `ecs_service_names` (maps keyed by service), `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `db_secret_arn`, `db_password` (sensitive).
+`alb_url`, `frontend_url`, `frontend_bucket`, `frontend_distribution_id`, `ecr_repository_urls` and `ecs_service_names` (maps keyed by service), `rds_endpoint`, `rds_port`, `ecs_cluster_name`, `db_secret_arn`, `db_password` (sensitive).
 
 ---
 

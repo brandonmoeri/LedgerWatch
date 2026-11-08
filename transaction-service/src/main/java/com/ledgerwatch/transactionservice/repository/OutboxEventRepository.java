@@ -12,6 +12,14 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, UUID> 
 
   List<OutboxEvent> findByAggregateIdOrderByCreatedAt(UUID aggregateId);
 
+  /** Events still to be delivered: neither published nor parked. */
+  long countByPublishedAtIsNullAndFailedAtIsNull();
+
+  /** When the oldest event still to be delivered was written, or null if there is none. */
+  @Query(
+      "SELECT min(e.createdAt) FROM OutboxEvent e WHERE e.publishedAt IS NULL AND e.failedAt IS NULL")
+  Instant findOldestUndeliveredCreatedAt();
+
   /**
    * Locks up to {@code limit} pending events that are due at {@code now}, oldest first. Rows
    * another transaction already holds are skipped rather than waited on, so concurrent publishers

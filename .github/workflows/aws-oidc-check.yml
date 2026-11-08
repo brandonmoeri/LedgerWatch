@@ -1,0 +1,24 @@
+name: AWS OIDC Check
+
+# Manual smoke test that GitHub Actions can assume the deploy role with no
+# stored AWS keys. Run it from the Actions tab on master or dev.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write # lets the job request a GitHub OIDC token
+  contents: read
+
+jobs:
+  whoami:
+    name: Assume deploy role
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Show caller identity
+        run: aws sts get-caller-identity

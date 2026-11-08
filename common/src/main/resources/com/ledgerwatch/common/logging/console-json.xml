@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- One JSON object per line. Fields: @timestamp, @version, message, logger_name, thread_name,
+     level, level_value, stack_trace (when present), service, and every MDC entry: correlationId,
+     plus outboxEventId and transactionId while the outbox publisher delivers an event. -->
+<included>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- Context properties would repeat SERVICE_NAME; "service" below carries it. -->
+            <includeContext>false</includeContext>
+            <customFields>{"service":"${SERVICE_NAME}"}</customFields>
+            <throwableConverter class="net.logstash.logback.stacktrace.ShortenedThrowableConverter">
+                <maxDepthPerThrowable>30</maxDepthPerThrowable>
+                <shortenedClassNameLength>40</shortenedClassNameLength>
+                <rootCauseFirst>true</rootCauseFirst>
+            </throwableConverter>
+        </encoder>
+    </appender>
+</included>

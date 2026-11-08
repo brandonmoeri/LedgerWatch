@@ -79,6 +79,15 @@ module "alb" {
   }
 }
 
+# The SPA from S3, with /api/* proxied to the ALB, so the browser sees one origin
+# (no CORS) exactly as with the Vite dev proxy.
+module "frontend" {
+  source = "./modules/frontend"
+
+  project           = var.project
+  api_origin_domain = module.alb.dns_name
+}
+
 module "account_service" {
   source = "./modules/ecs-service"
 
@@ -119,6 +128,9 @@ module "transaction_service" {
   service_name   = "transaction-service"
   container_port = 8082
   secrets        = local.service_secrets
+
+  # ledgerwatch.transactions.* and ledgerwatch.outbox.* (see the service's TransactionMetrics).
+  metrics_namespace = "LedgerWatch"
 
   load_balancer = {
     target_group_arn = module.alb.target_group_arns["transaction-service"]

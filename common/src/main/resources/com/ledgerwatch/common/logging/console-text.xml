@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Human-readable console output. The [correlationId] slot comes from logging.pattern.correlation
+     (see each service's application.yml), which Boot's CONSOLE_LOG_PATTERN places before the
+     logger name. -->
+<included>
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>${CONSOLE_LOG_PATTERN}</pattern>
+            <charset>${CONSOLE_LOG_CHARSET}</charset>
+        </encoder>
+    </appender>
+</included>

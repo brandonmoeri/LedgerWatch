@@ -70,8 +70,24 @@ management:
   endpoints:
     web:
       exposure:
-        # circuitbreakers / circuitbreakerevents require ROLE_ADMIN (see SecurityConfig).
-        include: health, circuitbreakers, circuitbreakerevents
+        # Everything but health requires ROLE_ADMIN (see SecurityConfig).
+        include: health, metrics, circuitbreakers, circuitbreakerevents
   endpoint:
     health:
       show-details: never
+  metrics:
+    tags:
+      application: ${spring.application.name}   # a CloudWatch dimension
+
+# Pushes the ledgerwatch.* meters (TransactionMetrics, OutboxBacklogMetrics) to CloudWatch; see
+# CloudWatchMetricsConfig. Terraform turns it on for ECS. Needs cloudwatch:PutMetricData.
+metrics:
+  cloudwatch:
+    enabled: ${METRICS_CLOUDWATCH_ENABLED:false}
+    namespace: ${METRICS_CLOUDWATCH_NAMESPACE:LedgerWatch}
+    step: 1m
+
+# [correlationId] in text-format log lines (LOG_FORMAT=text); JSON lines carry it as a field.
+logging:
+  pattern:
+    correlation: "[%X{correlationId:-}] "

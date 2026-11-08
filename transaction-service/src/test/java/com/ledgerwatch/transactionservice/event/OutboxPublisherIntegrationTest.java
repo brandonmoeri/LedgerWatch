@@ -12,6 +12,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.ledgerwatch.common.logging.CorrelationId;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
 import com.ledgerwatch.transactionservice.client.AccountServiceClient;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
@@ -19,9 +20,11 @@ import com.ledgerwatch.transactionservice.domain.Transaction;
 import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
 import com.ledgerwatch.transactionservice.domain.TransactionStatus;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
+import com.ledgerwatch.transactionservice.metrics.TransactionMetrics;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
@@ -70,6 +73,7 @@ class OutboxPublisherIntegrationTest {
   @Autowired ObjectMapper objectMapper;
   @Autowired TransactionTemplate transactionTemplate;
   @Autowired CircuitBreakerRegistry circuitBreakerRegistry;
+  @Autowired MeterRegistry meterRegistry;
 
   @BeforeEach
   void resetBreaker() {
@@ -84,8 +88,11 @@ class OutboxPublisherIntegrationTest {
   private record Pending(UUID eventId, UUID transactionId, UUID accountId) {}
 
   private Pending pendingEvent(TransactionType type, String amount) throws Exception {
-    UUID transactionId = UUID.randomUUID();
-    UUID accountId = UUID.randomUUID();
+    return pendingEvent(UUID.randomUUID(), UUID.randomUUID(), type, amount);
+  }
+
+  private Pending pendingEvent(
+      UUID transactionId, UUID accountId, TransactionType type, String amount) throws Exception {
     var payload =
         new TransactionCreatedEvent(
             transactionId, accountId, type, new BigDecimal(amount), "Coffee", Instant.now());
@@ -113,6 +120,10 @@ class OutboxPublisherIntegrationTest {
                     .withBody("{}")));
   }
 
+  private double counted(String name, String tag, String value) {
+    return meterRegistry.get(name).tag(tag, value).counter().count();
+  }
+
   private OutboxEvent reload(Pending pending) {
     return outboxEventRepository.findById(pending.eventId()).orElseThrow();
   }
@@ -137,6 +148,20 @@ class OutboxPublisherIntegrationTest {
     publisher.publishPending();
 
     accountService.verify(1, anyRequestedFor(anyUrl()));
+  }
+
+  @Test
+  void eventWithoutACorrelationId_isStillDeliveredWithOne() throws Exception {
+    // Rows written before V6 have no correlation id; delivery mints one rather than sending none.
+    Pending pending = pendingEvent(TransactionType.CREDIT, "1.00");
+    stubAdjustment(pending.accountId(), 200);
+
+    publisher.publishPending();
+
+    String sent =
+        accountService.getAllServeEvents().get(0).getRequest().getHeader(CorrelationId.HEADER);
+    assertThat(CorrelationId.isValid(sent)).isTrue();
+    assertThat(CorrelationId.current()).as("MDC is cleared after the poll").isNull();
   }
 
   @Test
@@ -228,5 +253,45 @@ class OutboxPublisherIntegrationTest {
     other.get(10, TimeUnit.SECONDS);
     accountService.verify(0, anyRequestedFor(anyUrl()));
     assertThat(reload(pending).getPublishedAt()).isNull();
+  }
+
+  @Test
+  void postedTransaction_isCountedOnce_evenIfItsEventIsDeliveredAgain() throws Exception {
+    Transaction tx = new Transaction();
+    tx.setAccountId(UUID.randomUUID());
+    tx.setType(TransactionType.DEBIT);
+    tx.setAmount(new BigDecimal("5.00"));
+    UUID id = transactionRepository.save(tx).getId();
+    stubAdjustment(tx.getAccountId(), 200);
+    double before = counted(TransactionMetrics.POSTED, "type", "DEBIT");
+
+    pendingEvent(id, tx.getAccountId(), TransactionType.DEBIT, "5.00");
+    publisher.publishPending();
+    // A second copy stands in for redelivery after a crash between delivering and recording it.
+    pendingEvent(id, tx.getAccountId(), TransactionType.DEBIT, "5.00");
+    publisher.publishPending();
+
+    assertThat(transactionRepository.findById(id).orElseThrow().getStatus())
+        .isEqualTo(TransactionStatus.POSTED);
+    assertThat(counted(TransactionMetrics.POSTED, "type", "DEBIT")).isEqualTo(before + 1);
+    transactionRepository.deleteAll();
+  }
+
+  @Test
+  void rejectedTransaction_isCountedByReason() throws Exception {
+    Transaction tx = new Transaction();
+    tx.setAccountId(UUID.randomUUID());
+    tx.setType(TransactionType.CREDIT);
+    tx.setAmount(new BigDecimal("5.00"));
+    UUID id = transactionRepository.save(tx).getId();
+    stubAdjustment(tx.getAccountId(), 404);
+    double before = counted(TransactionMetrics.REJECTED, "reason", "ACCOUNT_NOT_FOUND");
+
+    pendingEvent(id, tx.getAccountId(), TransactionType.CREDIT, "5.00");
+    publisher.publishPending();
+
+    assertThat(counted(TransactionMetrics.REJECTED, "reason", "ACCOUNT_NOT_FOUND"))
+        .isEqualTo(before + 1);
+    transactionRepository.deleteAll();
   }
 }

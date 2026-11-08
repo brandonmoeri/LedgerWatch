@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared logging config for every LedgerWatch service (ships in the common jar, so each service
+  picks it up from the classpath).
+
+  LOG_FORMAT selects the console output:
+    text (default) - Boot's usual pattern plus [correlationId], for local runs and tests
+    json           - one JSON object per line (logstash-logback-encoder), set in the Dockerfiles
+                     so docker compose and ECS/CloudWatch get structured logs
+
+  Only the selected format's appender is defined (each lives in its own include), so logback
+  doesn't warn about an unused one.
+-->
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+    <!-- Boot only resolves springProperty at the top level, so it lives here rather than in the include. -->
+    <springProperty scope="context" name="SERVICE_NAME" source="spring.application.name"
+                    defaultValue="unknown"/>
+    <include resource="com/ledgerwatch/common/logging/console-${LOG_FORMAT:-text}.xml"/>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+    </root>
+</configuration>

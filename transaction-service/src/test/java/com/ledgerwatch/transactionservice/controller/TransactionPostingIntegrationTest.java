@@ -17,6 +17,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.ledgerwatch.common.logging.CorrelationId;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
@@ -215,6 +216,53 @@ class TransactionPostingIntegrationTest {
     Jwt token = jwtDecoder.decode(authorization.substring("Bearer ".length()));
     assertThat(token.getSubject()).isEqualTo("transaction-service");
     assertThat(token.getClaimAsStringList("roles")).containsExactly("SERVICE");
+  }
+
+  @Test
+  void correlationId_followsTheTransactionFromRequestToAccountService() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubAdjustment(accountId, 200);
+    var request =
+        new CreateTransactionRequest(accountId, TransactionType.CREDIT, BigDecimal.TEN, null);
+
+    var result =
+        mockMvc
+            .perform(
+                MockMvcRequestBuilders.post("/transactions")
+                    .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN")))
+                    .header(CorrelationId.HEADER, "client-req-42")
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .content(objectMapper.writeValueAsString(request)))
+            .andExpect(status().isAccepted())
+            .andExpect(header().string(CorrelationId.HEADER, "client-req-42"))
+            .andReturn();
+    String id = objectMapper.readTree(result.getResponse().getContentAsString()).get("id").asText();
+    assertThat(eventFor(id).getCorrelationId()).isEqualTo("client-req-42");
+
+    // Delivery runs later, outside the request, but still under the request's id.
+    publisher.publishPending();
+
+    accountService.verify(
+        1,
+        postRequestedFor(urlEqualTo(adjustmentPath(accountId)))
+            .withHeader(CorrelationId.HEADER, equalTo("client-req-42")));
+  }
+
+  @Test
+  void correlationId_isGeneratedWhenTheClientSendsNone_andStillForwarded() throws Exception {
+    UUID accountId = UUID.randomUUID();
+    stubAdjustment(accountId, 200);
+
+    String id = create(accountId, TransactionType.CREDIT, "1.00");
+    String generated = eventFor(id).getCorrelationId();
+    assertThat(CorrelationId.isValid(generated)).isTrue();
+
+    publisher.publishPending();
+
+    accountService.verify(
+        1,
+        postRequestedFor(urlEqualTo(adjustmentPath(accountId)))
+            .withHeader(CorrelationId.HEADER, equalTo(generated)));
   }
 
   @Test
