@@ -52,3 +52,13 @@ output "db_password" {
   value     = module.rds.password
   sensitive = true
 }
+
+output "dashboard_url" {
+  description = "CloudWatch dashboard: 5xx rates, latency, outbox lag, transaction counts"
+  value       = module.monitoring.dashboard_url
+}
+
+output "alarm_topic_arn" {
+  description = "SNS topic every alarm notifies; subscribe more endpoints to it as needed"
+  value       = module.monitoring.alarm_topic_arn
+}

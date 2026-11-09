@@ -92,12 +92,12 @@ transaction-service registers its own Micrometer meters, all prefixed `ledgerwat
 |---|---|---|---|
 | `ledgerwatch.transactions.posted` | Counter | `type` | Transactions settled POSTED |
 | `ledgerwatch.transactions.rejected` | Counter | `reason` | Transactions settled REJECTED (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`) |
-| `ledgerwatch.outbox.lag` | Time gauge (s) | — | Age of the oldest undelivered outbox event; 0 when the outbox is drained |
+| `ledgerwatch.outbox.lag` | Time gauge (s; ms in CloudWatch) | — | Age of the oldest undelivered outbox event; 0 when the outbox is drained |
 | `ledgerwatch.outbox.pending` | Gauge | — | Undelivered outbox events |
 
 - **Counters** (`TransactionMetrics`) are incremented by `OutboxPublisher` after the status update commits, and only if `markPosted`/`markRejected` actually moved the row out of PENDING, so a redelivered event isn't counted twice. Every tag value is registered at startup, so idle series report 0 rather than no data.
 - **Gauges** (`OutboxBacklogMetrics`) query `outbox_event` each time they're sampled. "Undelivered" means neither published nor parked: events backing off after a transient failure count, parked ones don't. Lag is the signal to alarm on: it climbs steadily while account-service is down or the publisher has stalled, even if only one event is waiting.
-- **Export:** with `metrics.cloudwatch.enabled=true`, `CloudWatchMetricsConfig` pushes to CloudWatch every minute (`metrics.cloudwatch.step`) under namespace `LedgerWatch`, with dimension `application=transaction-service`. Boot 3.3 has no CloudWatch auto-configuration, so the registry is declared there. It filters out everything not prefixed `ledgerwatch.`, because CloudWatch bills each name/dimension combination as a custom metric. In CloudWatch, counters appear as `<name>.count` (Sum per minute = transactions settled that minute) and gauges as `<name>.value`. Export is off locally; `GET /actuator/metrics/ledgerwatch.outbox.lag` (ADMIN) shows the same values.
+- **Export:** with `metrics.cloudwatch.enabled=true`, `CloudWatchMetricsConfig` pushes to CloudWatch every minute (`metrics.cloudwatch.step`) under namespace `LedgerWatch`, with dimension `application=transaction-service`. Boot 3.3 has no CloudWatch auto-configuration, so the registry is declared there. It filters out everything not prefixed `ledgerwatch.`, because CloudWatch bills each name/dimension combination as a custom metric. In CloudWatch, counters appear as `<name>.count` (Sum per minute = transactions settled that minute) and gauges as `<name>.value`. The CloudWatch registry publishes time gauges in its base unit, milliseconds, so `ledgerwatch.outbox.lag.value` is in ms there, and the dashboard divides by 1000. Export is off locally; `GET /actuator/metrics/ledgerwatch.outbox.lag` (ADMIN) shows the same values.
 
 ---
 
@@ -411,7 +411,7 @@ Vitest + jsdom + `@testing-library/react`. Test setup in `src/test/setup.ts`.
 
 ## Infrastructure (AWS)
 
-Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service, transaction-service and the React SPA**. The root module wires five local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
+Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service, transaction-service and the React SPA**. The root module wires six local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
 
 | Module | Owns |
 |---|---|
@@ -419,6 +419,7 @@ Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys
 | `modules/rds` | Postgres instance, subnet group, security group, DB credentials secret |
 | `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service |
 | `modules/frontend` | Private S3 bucket for the SPA build, CloudFront distribution (S3 + ALB origins), origin access control, two CloudFront Functions |
+| `modules/monitoring` | CloudWatch dashboard, alarms on each service's 5xx rate, ALB-generated 5xx and outbox lag, and the SNS topic they notify (optional email subscription via `alarm_email`) |
 | `modules/ecs-service` | One service: ECR repository, log group, execution role, optional task role (with `metrics_namespace`), security group, Cloud Map record, task definition, ECS service |
 
 The two services are separate `ecs-service` module calls rather than a `for_each`, because they reference each other: account-service allows ingress from transaction-service's security group, and transaction-service reads account-service's internal URL.
@@ -440,6 +441,7 @@ The two services are separate `ecs-service` module calls rather than a `for_each
 | **Cloud Map** | Private DNS namespace `ledgerwatch.local`; transaction-service calls `http://account-service.ledgerwatch.local:8081` via `ACCOUNT_SERVICE_URL` |
 | **RDS** | Postgres 16, `db.t4g.micro`, 20 GB gp3, single-AZ, publicly accessible, no final snapshot |
 | **CloudWatch metrics** | transaction-service pushes 7 custom metrics to namespace `LedgerWatch` once a minute. Its task role (`ledgerwatch-transaction-service-task`) may call `cloudwatch:PutMetricData` only with that namespace (a `cloudwatch:namespace` condition, since the action has no resource-level permissions) |
+| **CloudWatch alarms** | `ledgerwatch-<service>-5xx-rate`: target 5xx ÷ `RequestCount` per target group, a metric-math `IF` that reads 0 below 10 requests in the 5-minute window. `ledgerwatch-alb-5xx`: a count of `HTTPCode_ELB_5XX_Count`, since requests rejected before a target is chosen aren't in `RequestCount`. `ledgerwatch-outbox-lag`: Maximum of `ledgerwatch.outbox.lag.value` > 300 000 ms for 3 of 3 minutes; missing data stays missing, so a paused service doesn't look healthy or broken. All notify the `ledgerwatch-alarms` SNS topic on ALARM and OK |
 | **Secrets Manager** | `ledgerwatch/db` stores `url`, `username`, `password` JSON; `ledgerwatch/jwt` stores the shared HMAC key. Each service's task execution role reads them at startup |
 | **Security groups** | One per service: all egress open; ingress on the container port from the ALB, plus the optional `admin_cidr` variable. account-service also allows `8081` from transaction-service. RDS: inbound `5432` from both service SGs (and optional `admin_cidr`) |
 

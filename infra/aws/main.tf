@@ -50,6 +50,9 @@ resource "aws_secretsmanager_secret_version" "jwt" {
 }
 
 locals {
+  # transaction-service's ledgerwatch.* meters (see its TransactionMetrics, OutboxBacklogMetrics).
+  metrics_namespace = "LedgerWatch"
+
   service_secrets = {
     DB_URL      = { arn = module.rds.secret_arn, key = "url" }
     DB_USERNAME = { arn = module.rds.secret_arn, key = "username" }
@@ -129,8 +132,7 @@ module "transaction_service" {
   container_port = 8082
   secrets        = local.service_secrets
 
-  # ledgerwatch.transactions.* and ledgerwatch.outbox.* (see the service's TransactionMetrics).
-  metrics_namespace = "LedgerWatch"
+  metrics_namespace = local.metrics_namespace
 
   load_balancer = {
     target_group_arn = module.alb.target_group_arns["transaction-service"]
@@ -143,4 +145,17 @@ module "transaction_service" {
   environment = {
     ACCOUNT_SERVICE_URL = module.account_service.internal_url
   }
+}
+
+# Dashboard, plus alarms on each service's 5xx rate, ALB-generated 5xx and
+# outbox lag, all notifying one SNS topic.
+module "monitoring" {
+  source = "./modules/monitoring"
+
+  project                   = var.project
+  aws_region                = var.aws_region
+  load_balancer_arn_suffix  = module.alb.arn_suffix
+  target_group_arn_suffixes = module.alb.target_group_arn_suffixes
+  metrics_namespace         = local.metrics_namespace
+  alarm_email               = var.alarm_email
 }

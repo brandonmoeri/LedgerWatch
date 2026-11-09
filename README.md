@@ -136,7 +136,7 @@ docker push <transaction-service-repo-url>:latest
 
 terraform apply -var "admin_cidr=<your-ip>/32" -target=module.rds
 docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<rds_endpoint>:5432/ledgerwatch?sslmode=require" < docker/postgres/init.sql  # from the repo root
-terraform apply -var "admin_cidr=<your-ip>/32"
+terraform apply -var "admin_cidr=<your-ip>/32" -var "alarm_email=<you@example.com>"  # alarm_email is optional
 curl -i "$(terraform output -raw alb_url)/accounts"  # 401 from account-service means routing works
 ```
 
@@ -167,8 +167,8 @@ The stack has three states, and the right one depends on whether anyone needs to
 
 | State | Cost | Live URL | Time to full service |
 |---|---|---|---|
-| **Running** | ~$90/mo (~$2.95/day) | Works | — |
-| **Paused** (tasks at 0, RDS stopped) | ~$28/mo | Same URL; the SPA loads but every API call fails | ~10 min |
+| **Running** | ~$91/mo (~$2.97/day) | Works | — |
+| **Paused** (tasks at 0, RDS stopped) | ~$29/mo | Same URL; the SPA loads but every API call fails | ~10 min |
 | **Torn down** | < $0.10/mo | Gone; a new CloudFront URL is created on the next bring-up | ~30 min, partly manual |
 
 #### Monthly cost estimate
@@ -183,11 +183,24 @@ These are us-east-1 on-demand list prices with no free tier, at 730 hours a mont
 | RDS `db.t4g.micro` + 20 GB gp3 | $13.98 | $2.30 | Compute $11.68 + storage $2.30. A stopped instance is billed for storage only |
 | Secrets Manager (2 secrets), Cloud Map / Route 53 private zone, ECR, CloudWatch Logs | ~$2 | ~$2 | ECR grows with every deploy's `:<sha>` tag (no lifecycle policy yet) |
 | CloudWatch custom metrics (7) + `PutMetricData` | ~$2.55 | $0 | $0.30 per metric plus one request a minute per task ($0.44). Only `ledgerwatch.*` meters are shipped; Boot's own would add a few hundred. Billed only for hours a task is pushing |
+| CloudWatch alarms (4) + dashboard | $0.60 | $0.60 | Alarms bill $0.10 per metric they read, and each 5xx-rate alarm reads two. The dashboard is within the free 3 per account (up to 50 metrics each); a fourth would be $3/mo. SNS email is free at this volume |
 | S3 + CloudFront | ~$0 | ~$0 | Within CloudFront's always-free tier |
 | Terraform state bucket | < $0.10 | < $0.10 | Survives teardown (`prevent_destroy`) |
-| **Total** | **~$90** | **~$28** | |
+| **Total** | **~$91** | **~$29** | |
 
 A rolling deploy briefly runs a third task, which costs fractions of a cent. To check the estimate against the bill, look at Cost Explorer grouped by service.
+
+#### Monitoring
+
+`terraform output dashboard_url` opens the `ledgerwatch` CloudWatch dashboard: alarm status, each service's 5xx rate, requests, p95 latency, outbox lag and backlog, and transactions posted/rejected per minute. Every alarm notifies the `ledgerwatch-alarms` SNS topic, on entering ALARM and on recovering. With `alarm_email` set, AWS sends a confirmation email first, and nothing is delivered until you click its link.
+
+| Alarm | Fires when |
+|---|---|
+| `ledgerwatch-<service>-5xx-rate` | More than 5% of the service's requests return 5xx over 5 minutes, once it has had at least 10 requests in that window |
+| `ledgerwatch-alb-5xx` | The ALB itself returns 5+ 5xx in 5 minutes (502/503/504: no healthy tasks, refused connections, timeouts). A count, because AWS leaves requests rejected before a target is chosen out of `RequestCount`, so a rate would read 0 during a full outage |
+| `ledgerwatch-outbox-lag` | The oldest undelivered outbox event is older than 5 minutes for 3 consecutive minutes |
+
+The thresholds are variables of `modules/monitoring`. While the stack is paused, the outbox alarm goes to INSUFFICIENT_DATA without notifying, and `ledgerwatch-alb-5xx` fires if anyone calls the API.
 
 #### Pausing (scale to zero)
 
