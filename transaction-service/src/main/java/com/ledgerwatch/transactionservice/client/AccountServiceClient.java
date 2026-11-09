@@ -131,5 +131,47 @@ public class AccountServiceClient {
     }
   }
 
+  /**
+   * Fetches the account. Wrapped in the same retry and circuit breaker as {@link
+   * #applyBalanceDelta}.
+   *
+   * @throws NoSuchElementException the account does not exist
+   * @throws AccountServiceUnavailableException account-service is unreachable, timed out, or
+   *     returned 5xx on every attempt
+   * @throws AccountServiceException account-service returned another unexpected status
+   * @throws CallNotPermittedException the circuit breaker is open; no request was sent
+   */
+  @Retry(name = RESILIENCE_INSTANCE)
+  @CircuitBreaker(name = RESILIENCE_INSTANCE)
+  public AccountSummary getAccount(UUID accountId) {
+    try {
+      return restClient
+          .get()
+          .uri("/internal/accounts/{id}", accountId)
+          .retrieve()
+          .onStatus(
+              status -> status.isSameCodeAs(HttpStatus.NOT_FOUND),
+              (request, response) -> {
+                throw new NoSuchElementException("Account not found: " + accountId);
+              })
+          .onStatus(
+              HttpStatusCode::is5xxServerError,
+              (request, response) -> {
+                throw new AccountServiceUnavailableException(
+                    "account-service returned " + response.getStatusCode().value());
+              })
+          .onStatus(
+              HttpStatusCode::isError,
+              (request, response) -> {
+                throw new AccountServiceException(
+                    "account-service returned " + response.getStatusCode().value());
+              })
+          .body(AccountSummary.class);
+    } catch (ResourceAccessException e) {
+      throw new AccountServiceUnavailableException(
+          "account-service is unreachable or timed out", e);
+    }
+  }
+
   record BalanceAdjustment(UUID adjustmentId, BigDecimal delta) {}
 }

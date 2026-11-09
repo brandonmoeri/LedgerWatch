@@ -37,6 +37,22 @@ outbox:
     initial-backoff: 1s       # 1s, 2s, 4s ... per event after each transient failure
     max-backoff: 5m
 
+# Fraud rules run by OutboxPublisher before each balance change (see FraudRuleEngine). In ENFORCE
+# mode any hit rejects the transaction as SUSPECTED_FRAUD; MONITOR records hits and posts anyway.
+fraud:
+  enabled: ${FRAUD_RULES_ENABLED:true}
+  mode: ${FRAUD_RULES_MODE:enforce}
+  velocity:
+    max-transactions: 10      # per account, counting this one, any type or status
+    window: 10m
+  amount-spike:
+    multiplier: 3             # amount > 3x the average POSTED amount of the same type ...
+    lookback: 30d             # ... over the 30 days before the transaction
+    min-history: 3            # skipped with fewer prior transactions than this
+  new-account:
+    max-age: 24h              # accounts younger than this when the transaction was created ...
+    large-debit-threshold: 1000   # ... may not DEBIT this much or more
+
 # Resilience for AccountServiceClient. Only AccountServiceUnavailableException (I/O failure,
 # timeout, 5xx) is retried or counted by the breaker; 4xx answers are final. Retries are safe
 # because account-service applies each adjustment id (the transaction id) at most once.

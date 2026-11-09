@@ -91,7 +91,8 @@ transaction-service registers its own Micrometer meters, all prefixed `ledgerwat
 | Meter | Type | Tags | Meaning |
 |---|---|---|---|
 | `ledgerwatch.transactions.posted` | Counter | `type` | Transactions settled POSTED |
-| `ledgerwatch.transactions.rejected` | Counter | `reason` | Transactions settled REJECTED (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`) |
+| `ledgerwatch.transactions.rejected` | Counter | `reason` | Transactions settled REJECTED (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`, `SUSPECTED_FRAUD`) |
+| `ledgerwatch.fraud.signals` | Counter | `rule` | Fraud rule hits (`VELOCITY`, `AMOUNT_SPIKE`, `NEW_ACCOUNT_LARGE_DEBIT`), counted once per transaction in both `ENFORCE` and `MONITOR` mode |
 | `ledgerwatch.outbox.lag` | Time gauge (s; ms in CloudWatch) | — | Age of the oldest undelivered outbox event; 0 when the outbox is drained |
 | `ledgerwatch.outbox.pending` | Gauge | — | Undelivered outbox events |
 
@@ -158,6 +159,7 @@ accounts.account
 | `GET` | `/accounts/{id}` | Any role | Fetch by UUID |
 | `POST` | `/accounts` | `ADMIN` | Create (`ownerName`, optional `initialBalance`) |
 | `PATCH` | `/accounts/{id}` | `ADMIN` | Update `ownerName` and/or `status` |
+| `GET` | `/internal/accounts/{id}` | `SERVICE` | Internal. The account, including `createdAt`; transaction-service's fraud rules use it to judge account age. 404 if unknown |
 | `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 422 (insufficient funds) if a negative delta would take the balance below zero; a debit down to exactly 0 is allowed, and credits are never blocked. 409 if the account is `FROZEN`/`CLOSED`. Optimistic-lock conflicts are retried server-side, each attempt in a fresh transaction with jittered exponential backoff (`balance-retry.max-attempts` 10, `initial-backoff` 5ms, `max-backoff` 200ms). 409 only if every attempt conflicts |
 
 #### Configuration
@@ -189,6 +191,7 @@ PENDING ──> POSTED ──> VOIDED     (VOIDED: PATCH by an ADMIN)
 
 | Publisher outcome | Transaction | Outbox row |
 |---|---|---|
+| Fraud rules block it (checked before account-service is called) | `REJECTED`, `SUSPECTED_FRAUD` | parked |
 | account-service accepts the change | `POSTED` | `published_at` set |
 | `404` no such account | `REJECTED`, `ACCOUNT_NOT_FOUND` | parked |
 | `409` with type `urn:ledgerwatch:problem:account-not-active` | `REJECTED`, `ACCOUNT_NOT_ACTIVE` | parked |
@@ -226,6 +229,7 @@ sequenceDiagram
         TxDB-->>Pub: Up to batch-size events
 
         loop Each event, outside any DB transaction
+            Pub->>TxDB: Fraud rules: reuse stored verdict or evaluate and store it<br/>Blocked: PENDING to REJECTED (SUSPECTED_FRAUD), parked, next event
             Pub->>Acct: POST /internal/accounts/{id}/balance-adjustments<br/>adjustmentId = transaction id, signed delta
             Acct->>AcctDB: Known adjustmentId: replay, no change<br/>Otherwise check ACTIVE and funds, then<br/>update balance and insert balance_adjustment
 
@@ -259,6 +263,20 @@ sequenceDiagram
 - **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
 - **Telling 409s apart:** account-service reports a FROZEN or CLOSED account as `AccountNotActiveException`, with the problem type `urn:ledgerwatch:problem:account-not-active`. Every other `409` becomes `AccountServiceConflictException`, which is worth retrying later. It doesn't count against the circuit breaker, because account-service is healthy.
+
+#### Fraud rules
+
+Before sending a transaction's balance change, `OutboxPublisher` passes it to `FraudRuleEngine`, which runs every `FraudRule` bean (strategy pattern; add a rule by adding a `@Component` that implements it). Every rule runs, so all reasons are recorded, not just the first. Each rule judges the transaction as of its `createdAt`, not the time it's delivered.
+
+| Rule | Fires when | Config (`fraud.*`, defaults) |
+|---|---|---|
+| `VELOCITY` | The account has more than `max-transactions` transactions (any type or status, counting this one) in the `window` up to this one | `velocity.max-transactions: 10`, `velocity.window: 10m` |
+| `AMOUNT_SPIKE` | The amount exceeds `multiplier` × the average of the account's `POSTED` transactions **of the same type** in the `lookback` before it. Skipped with fewer than `min-history` of them | `amount-spike.multiplier: 3`, `lookback: 30d`, `min-history: 3` |
+| `NEW_ACCOUNT_LARGE_DEBIT` | A `DEBIT` of at least `large-debit-threshold` from an account younger than `max-age`. Calls account-service's `GET /internal/accounts/{id}`, but only for debits at or over the threshold | `new-account.max-age: 24h`, `large-debit-threshold: 1000` |
+
+- **Mode:** `fraud.mode` (`FRAUD_RULES_MODE`) is `enforce` by default: any hit rejects the transaction as `SUSPECTED_FRAUD` and account-service is never called. `monitor` records hits and posts the transaction anyway, for trying thresholds on live traffic. `fraud.enabled` (`FRAUD_RULES_ENABLED`) turns screening off.
+- **Stored verdict:** each verdict is written to `fraud_screening` before the balance call. A redelivered event reuses it instead of re-running the rules, whose inputs (such as the 30-day average) may have changed, so a transaction can't post on one attempt and be rejected on the next after its balance has already moved.
+- **Failures:** if the account lookup fails, the event is handled like any failed account-service call: backoff for an outage, `ACCOUNT_NOT_FOUND` for a 404. Nothing is stored, so the rules run again on the retry.
 
 #### Transactional outbox
 
@@ -322,6 +340,14 @@ transactions.outbox_event                             -- V3
   failed_at      TIMESTAMPTZ                           -- V4: parked; never retried
   correlation_id VARCHAR(128)                          -- V6: id of the request that wrote it
   INDEX (next_attempt_at, created_at) WHERE published_at IS NULL AND failed_at IS NULL
+
+transactions.fraud_screening                          -- V7
+  transaction_id UUID PK                               -- no FK, like outbox_event
+  blocked        BOOLEAN NOT NULL                      -- true: rejected as SUSPECTED_FRAUD
+  signals        JSONB NOT NULL                        -- [{"rule", "detail"}], [] if clear
+  screened_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  INDEX (screened_at) WHERE signals <> '[]'            -- flagged only
+-- V7 also adds INDEX transaction(account_id, created_at) for the rules' lookups
 ```
 
 #### REST API
@@ -348,7 +374,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`, `V7__fraud_screening.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.

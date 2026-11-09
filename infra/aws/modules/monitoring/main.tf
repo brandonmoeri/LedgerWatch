@@ -297,7 +297,7 @@ locals {
         stacked = true
         yAxis   = { left = { min = 0, showUnits = false } }
         metrics = [
-          for reason in ["ACCOUNT_NOT_FOUND", "ACCOUNT_NOT_ACTIVE", "INSUFFICIENT_FUNDS"] :
+          for reason in ["ACCOUNT_NOT_FOUND", "ACCOUNT_NOT_ACTIVE", "INSUFFICIENT_FUNDS", "SUSPECTED_FRAUD"] :
           concat([var.metrics_namespace, "ledgerwatch.transactions.rejected.count"], local.app_dimension, ["reason", reason, { label = reason }])
         ]
       })

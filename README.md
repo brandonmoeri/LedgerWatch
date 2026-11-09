@@ -75,7 +75,7 @@ Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 | `POST` | `/transactions` | Accept a transaction (`accountId`, `type`, `amount`, optional `description`) and return `202` with status `PENDING`; send an `Idempotency-Key` header to make retries safe |
 | `PATCH` | `/transactions/{id}` | Update `description`, or void a `POSTED` transaction |
 
-Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`, `VOIDED`. The balance is applied asynchronously: poll `GET /transactions/{id}` until the status is `POSTED` or `REJECTED`, which comes with a `rejectionReason` (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE` or `INSUFFICIENT_FUNDS`).
+Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`, `VOIDED`. The balance is applied asynchronously: poll `GET /transactions/{id}` until the status is `POSTED` or `REJECTED`, which comes with a `rejectionReason` (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`, or `SUSPECTED_FRAUD` when a fraud rule blocked it before posting: see [Fraud rules](ARCHITECTURE.md#fraud-rules)).
 
 ## AWS deployment
 

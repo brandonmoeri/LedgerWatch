@@ -5,7 +5,8 @@ export type TransactionStatus = 'PENDING' | 'POSTED' | 'REJECTED' | 'VOIDED';
 export type TransactionRejectionReason =
     | 'ACCOUNT_NOT_FOUND'
     | 'ACCOUNT_NOT_ACTIVE'
-    | 'INSUFFICIENT_FUNDS';
+    | 'INSUFFICIENT_FUNDS'
+    | 'SUSPECTED_FRAUD';
 
 export interface Transaction {
     id: string;

@@ -11,6 +11,10 @@ import com.ledgerwatch.transactionservice.client.AccountServiceUnavailableExcept
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
+import com.ledgerwatch.transactionservice.fraud.FraudContext;
+import com.ledgerwatch.transactionservice.fraud.FraudRuleEngine;
+import com.ledgerwatch.transactionservice.fraud.FraudVerdict;
+import com.ledgerwatch.transactionservice.fraud.SuspectedFraudException;
 import com.ledgerwatch.transactionservice.metrics.TransactionMetrics;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
@@ -79,6 +83,7 @@ public class OutboxPublisher {
   private final ObjectMapper objectMapper;
   private final OutboxPublisherProperties properties;
   private final TransactionMetrics metrics;
+  private final FraudRuleEngine fraudRules;
   private final Clock clock;
 
   @Autowired
@@ -90,7 +95,8 @@ public class OutboxPublisher {
       TransactionOperations transactions,
       ObjectMapper objectMapper,
       OutboxPublisherProperties properties,
-      TransactionMetrics metrics) {
+      TransactionMetrics metrics,
+      FraudRuleEngine fraudRules) {
     this(
         repo,
         transactionRepo,
@@ -100,6 +106,7 @@ public class OutboxPublisher {
         objectMapper,
         properties,
         metrics,
+        fraudRules,
         Clock.systemUTC());
   }
 
@@ -112,6 +119,7 @@ public class OutboxPublisher {
       ObjectMapper objectMapper,
       OutboxPublisherProperties properties,
       TransactionMetrics metrics,
+      FraudRuleEngine fraudRules,
       Clock clock) {
     this.repo = repo;
     this.transactionRepo = transactionRepo;
@@ -121,6 +129,7 @@ public class OutboxPublisher {
     this.objectMapper = objectMapper;
     this.properties = properties;
     this.metrics = metrics;
+    this.fraudRules = fraudRules;
     this.clock = clock;
   }
 
@@ -178,6 +187,9 @@ public class OutboxPublisher {
       return false;
     } catch (AccountServiceUnavailableException | AccountServiceConflictException e) {
       scheduleRetry(event, e);
+      return true;
+    } catch (SuspectedFraudException e) {
+      reject(event, TransactionRejectionReason.SUSPECTED_FRAUD, e);
       return true;
     } catch (NoSuchElementException e) {
       reject(event, TransactionRejectionReason.ACCOUNT_NOT_FOUND, e);
@@ -241,8 +253,11 @@ public class OutboxPublisher {
 
   /**
    * A {@code TransactionCreated} event becomes a balance adjustment keyed by the transaction id, so
-   * a replay of an applied adjustment is a no-op on account-service's side. Returns the
-   * transaction's type.
+   * a replay of an applied adjustment is a no-op on account-service's side. The fraud rules screen
+   * it first; their verdict is stored, so a redelivery gets the same one. Returns the transaction's
+   * type.
+   *
+   * @throws SuspectedFraudException the fraud rules blocked it; nothing was sent
    */
   private TransactionType deliver(OutboxEvent event) {
     if (!TransactionCreatedEvent.EVENT_TYPE.equals(event.getEventType())) {
@@ -253,6 +268,18 @@ public class OutboxPublisher {
       payload = objectMapper.readValue(event.getPayload(), TransactionCreatedEvent.class);
     } catch (JsonProcessingException e) {
       throw new IllegalArgumentException("Unreadable payload: " + e.getOriginalMessage(), e);
+    }
+    FraudVerdict verdict =
+        fraudRules.screen(
+            new FraudContext(
+                payload.transactionId(),
+                payload.accountId(),
+                payload.type(),
+                payload.amount(),
+                payload.createdAt(),
+                () -> accountServiceClient.getAccount(payload.accountId())));
+    if (verdict.blocked()) {
+      throw new SuspectedFraudException(verdict.signals());
     }
     accountServiceClient.applyBalanceDelta(
         payload.accountId(), payload.balanceDelta(), payload.transactionId());

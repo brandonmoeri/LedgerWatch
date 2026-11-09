@@ -34,6 +34,27 @@ public class InternalAccountController {
     this.accountService = accountService;
   }
 
+  @GetMapping("/{id}")
+  @Operation(
+      summary = "Fetch an account",
+      description =
+          "Returns the account, including when it was created. transaction-service's fraud"
+              + " rules use this to spot large debits on new accounts.")
+  @ApiResponses({
+    @ApiResponse(responseCode = "200", description = "Account found"),
+    @ApiResponse(
+        responseCode = "403",
+        description = "Caller lacks the SERVICE role",
+        content = @Content),
+    @ApiResponse(
+        responseCode = "404",
+        description = "Account not found",
+        content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
+  })
+  public AccountResponse getAccount(@PathVariable UUID id) {
+    return AccountResponse.from(accountService.getById(id));
+  }
+
   @PostMapping("/{id}/balance-adjustments")
   @Operation(
       summary = "Apply a balance delta",
