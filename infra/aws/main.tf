@@ -80,6 +80,15 @@ module "alb" {
       priority = 200
     }
   }
+
+  # Fraud flags live in transaction-service, but under account-service's /accounts/*.
+  path_overrides = {
+    account-fraud-flags = {
+      service  = "transaction-service"
+      paths    = ["/accounts/*/flags"]
+      priority = 50
+    }
+  }
 }
 
 # The SPA from S3, with /api/* proxied to the ALB, so the browser sees one origin

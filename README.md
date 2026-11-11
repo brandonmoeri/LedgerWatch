@@ -74,12 +74,13 @@ Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 | `GET` | `/transactions/{id}` | Fetch transaction by UUID |
 | `POST` | `/transactions` | Accept a transaction (`accountId`, `type`, `amount`, optional `description`) and return `202` with status `PENDING`; send an `Idempotency-Key` header to make retries safe |
 | `PATCH` | `/transactions/{id}` | Update `description`, or void a `POSTED` transaction |
+| `GET` | `/accounts/{id}/flags` | The account's fraud flags (rules that fired on its transactions), newest first |
 
 Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`, `VOIDED`. The balance is applied asynchronously: poll `GET /transactions/{id}` until the status is `POSTED` or `REJECTED`, which comes with a `rejectionReason` (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`, or `SUSPECTED_FRAUD` when a fraud rule blocked it before posting: see [Fraud rules](ARCHITECTURE.md#fraud-rules)).
 
 ## AWS deployment
 
-Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. An Application Load Balancer is the public entry point: `/accounts` and `/auth` go to `account-service`, `/transactions*` to `transaction-service`, and any other path gets a 404, so `/internal/*` isn't exposed. It listens on plain HTTP only. The React SPA is served from a private S3 bucket through CloudFront over HTTPS. CloudFront also forwards `/api/*` to the ALB with the `/api` prefix stripped, the same as the Vite dev proxy, so the browser talks to a single origin and no CORS is needed. `transaction-service` reaches `account-service` over Cloud Map private DNS. No NAT Gateway (cost-minimized).
+Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. An Application Load Balancer is the public entry point: `/accounts` and `/auth` go to `account-service`, `/transactions*` and `/accounts/*/flags` to `transaction-service`, and any other path gets a 404, so `/internal/*` isn't exposed. It listens on plain HTTP only. The React SPA is served from a private S3 bucket through CloudFront over HTTPS. CloudFront also forwards `/api/*` to the ALB with the `/api` prefix stripped, the same as the Vite dev proxy, so the browser talks to a single origin and no CORS is needed. `transaction-service` reaches `account-service` over Cloud Map private DNS. No NAT Gateway (cost-minimized).
 
 ### Remote state
 

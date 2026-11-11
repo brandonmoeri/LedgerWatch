@@ -229,7 +229,7 @@ sequenceDiagram
         TxDB-->>Pub: Up to batch-size events
 
         loop Each event, outside any DB transaction
-            Pub->>TxDB: Fraud rules: reuse stored verdict or evaluate and store it<br/>Blocked: PENDING to REJECTED (SUSPECTED_FRAUD), parked, next event
+            Pub->>TxDB: Fraud rules: reuse stored verdict or evaluate and store it, with a flag per hit<br/>Blocked: PENDING to REJECTED (SUSPECTED_FRAUD), parked, next event
             Pub->>Acct: POST /internal/accounts/{id}/balance-adjustments<br/>adjustmentId = transaction id, signed delta
             Acct->>AcctDB: Known adjustmentId: replay, no change<br/>Otherwise check ACTIVE and funds, then<br/>update balance and insert balance_adjustment
 
@@ -276,6 +276,7 @@ Before sending a transaction's balance change, `OutboxPublisher` passes it to `F
 
 - **Mode:** `fraud.mode` (`FRAUD_RULES_MODE`) is `enforce` by default: any hit rejects the transaction as `SUSPECTED_FRAUD` and account-service is never called. `monitor` records hits and posts the transaction anyway, for trying thresholds on live traffic. `fraud.enabled` (`FRAUD_RULES_ENABLED`) turns screening off.
 - **Stored verdict:** each verdict is written to `fraud_screening` before the balance call. A redelivered event reuses it instead of re-running the rules, whose inputs (such as the 30-day average) may have changed, so a transaction can't post on one attempt and be rejected on the next after its balance has already moved.
+- **Flags:** each signal is also written as a `fraud_flag` row, with the account id and the verdict's `blocked`, in the same DB transaction as the verdict, so a replay never adds flags and a crash never leaves a verdict without them. `GET /accounts/{id}/flags` lists them for review. Flags record `MONITOR`-mode hits too (`blocked: false`), which is what makes that mode useful for tuning. `fraud_screening.signals` is kept as the replay record, so instances on the previous release keep working during a rolling deploy.
 - **Failures:** if the account lookup fails, the event is handled like any failed account-service call: backoff for an outage, `ACCOUNT_NOT_FOUND` for a 404. Nothing is stored, so the rules run again on the retry.
 
 #### Transactional outbox
@@ -348,6 +349,17 @@ transactions.fraud_screening                          -- V7
   screened_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   INDEX (screened_at) WHERE signals <> '[]'            -- flagged only
 -- V7 also adds INDEX transaction(account_id, created_at) for the rules' lookups
+
+transactions.fraud_flag                               -- V8: one row per signal; back-filled from V7's signals
+  id             UUID PK DEFAULT gen_random_uuid()
+  transaction_id UUID NOT NULL FK → fraud_screening ON DELETE CASCADE
+  account_id     UUID NOT NULL
+  rule           VARCHAR(64) NOT NULL                  -- FraudRule.name()
+  detail         TEXT NOT NULL
+  blocked        BOOLEAN NOT NULL                      -- the screening's verdict
+  flagged_at     TIMESTAMPTZ NOT NULL DEFAULT now()    -- = screened_at
+  UNIQUE (transaction_id, rule)
+  INDEX (account_id, flagged_at DESC, id)
 ```
 
 #### REST API
@@ -357,6 +369,7 @@ transactions.fraud_screening                          -- V7
 | `GET` | `/transactions` | Any role | List transactions |
 | `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
+| `GET` | `/accounts/{id}/flags` | Any role | The account's fraud flags, newest first, paged (`page`, `size`, `sort`). Each has `transactionId`, `rule`, `detail`, `blocked` (rejected, or posted in `MONITOR` mode) and `flaggedAt`. Empty page if none. Lives here, not in account-service, because the flags do; the ALB routes this one path accordingly |
 | `POST` | `/transactions` | `ADMIN` | Accept (`accountId`, `type`, `amount` ≤4 dp, optional `description`): `202` with status `PENDING`. The outcome arrives later as `POSTED` or `REJECTED` with a `rejectionReason`; see [Transaction lifecycle](#transaction-lifecycle). Optional `Idempotency-Key` header: replays the original 202, 422 if reused with a different body |
 | `PATCH` | `/transactions/{id}` | `ADMIN` | Update `description`, or void a `POSTED` transaction with `status: VOIDED`. 409 for any other status change, or if the transaction is `VOIDED` or `REJECTED` |
 
@@ -374,7 +387,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`, `V7__fraud_screening.sql`.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`, `V7__fraud_screening.sql`, `V8__fraud_flag.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.
@@ -443,7 +456,7 @@ Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys
 |---|---|
 | `modules/network` | VPC, internet gateway, public subnets, route table |
 | `modules/rds` | Postgres instance, subnet group, security group, DB credentials secret |
-| `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service |
+| `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service, plus `path_overrides` for paths under another service's prefix (`/accounts/*/flags` → transaction-service) |
 | `modules/frontend` | Private S3 bucket for the SPA build, CloudFront distribution (S3 + ALB origins), origin access control, two CloudFront Functions |
 | `modules/monitoring` | CloudWatch dashboard, alarms on each service's 5xx rate, ALB-generated 5xx and outbox lag, and the SNS topic they notify (optional email subscription via `alarm_email`) |
 | `modules/ecs-service` | One service: ECR repository, log group, execution role, optional task role (with `metrics_namespace`), security group, Cloud Map record, task definition, ECS service |

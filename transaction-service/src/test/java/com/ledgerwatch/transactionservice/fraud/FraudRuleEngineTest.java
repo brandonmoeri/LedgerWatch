@@ -8,6 +8,7 @@ import static org.mockito.Mockito.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ledgerwatch.transactionservice.domain.FraudScreening;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
+import com.ledgerwatch.transactionservice.repository.FraudFlagRepository;
 import com.ledgerwatch.transactionservice.repository.FraudScreeningRepository;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.math.BigDecimal;
@@ -21,14 +22,17 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.BeanUtils;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.support.TransactionOperations;
 
 @SuppressWarnings("null")
 @ExtendWith(MockitoExtension.class)
 class FraudRuleEngineTest {
 
   private static final UUID TX_ID = UUID.randomUUID();
+  private static final UUID ACCOUNT_ID = UUID.randomUUID();
 
   @Mock FraudScreeningRepository screenings;
+  @Mock FraudFlagRepository flags;
 
   private final ObjectMapper objectMapper = new ObjectMapper();
   private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
@@ -67,13 +71,19 @@ class FraudRuleEngineTest {
 
   private FraudRuleEngine engine(FraudProperties.Mode mode, FraudRule... rules) {
     return new FraudRuleEngine(
-        List.of(rules), screenings, properties(true, mode), objectMapper, meterRegistry);
+        List.of(rules),
+        screenings,
+        flags,
+        TransactionOperations.withoutTransaction(),
+        properties(true, mode),
+        objectMapper,
+        meterRegistry);
   }
 
   private static FraudContext context() {
     return new FraudContext(
         TX_ID,
-        UUID.randomUUID(),
+        ACCOUNT_ID,
         TransactionType.DEBIT,
         BigDecimal.TEN,
         Instant.parse("2026-11-01T12:00:00Z"),
@@ -113,6 +123,9 @@ class FraudRuleEngineTest {
             TX_ID,
             true,
             "[{\"rule\":\"A\",\"detail\":\"A fired\"},{\"rule\":\"C\",\"detail\":\"C fired\"}]");
+    verify(flags).record(TX_ID, ACCOUNT_ID, "A", "A fired", true);
+    verify(flags).record(TX_ID, ACCOUNT_ID, "C", "C fired", true);
+    verifyNoMoreInteractions(flags);
     assertThat(signals("A")).isEqualTo(1);
     assertThat(signals("B")).isZero();
   }
@@ -127,6 +140,7 @@ class FraudRuleEngineTest {
 
     assertThat(verdict.blocked()).isFalse();
     assertThat(verdict.signals()).hasSize(1);
+    verify(flags).record(TX_ID, ACCOUNT_ID, "A", "A fired", false);
   }
 
   @Test
@@ -138,6 +152,7 @@ class FraudRuleEngineTest {
         engine(FraudProperties.Mode.ENFORCE, new FixedRule("A", false)).screen(context());
 
     assertThat(verdict).isEqualTo(FraudVerdict.CLEAR);
+    verifyNoInteractions(flags);
   }
 
   @Test
@@ -152,6 +167,7 @@ class FraudRuleEngineTest {
     assertThat(verdict.signals()).containsExactly(new FraudSignal("A", "earlier"));
     assertThat(rule.calls).isZero();
     verify(screenings, never()).record(any(), anyBoolean(), any());
+    verifyNoInteractions(flags);
     assertThat(signals("A")).isZero();
   }
 
@@ -166,6 +182,7 @@ class FraudRuleEngineTest {
         engine(FraudProperties.Mode.ENFORCE, new FixedRule("A", true)).screen(context());
 
     assertThat(verdict).isEqualTo(FraudVerdict.CLEAR);
+    verifyNoInteractions(flags);
     assertThat(signals("A")).isZero();
   }
 
@@ -188,6 +205,7 @@ class FraudRuleEngineTest {
     assertThatThrownBy(() -> engine(FraudProperties.Mode.ENFORCE, failing).screen(context()))
         .hasMessage("boom");
     verify(screenings, never()).record(any(), anyBoolean(), any());
+    verifyNoInteractions(flags);
   }
 
   @Test
@@ -197,12 +215,14 @@ class FraudRuleEngineTest {
         new FraudRuleEngine(
             List.of(rule),
             screenings,
+            flags,
+            TransactionOperations.withoutTransaction(),
             properties(false, FraudProperties.Mode.ENFORCE),
             objectMapper,
             meterRegistry);
 
     assertThat(engine.screen(context())).isEqualTo(FraudVerdict.CLEAR);
     assertThat(rule.calls).isZero();
-    verifyNoInteractions(screenings);
+    verifyNoInteractions(screenings, flags);
   }
 }

@@ -81,6 +81,24 @@ resource "aws_lb_listener" "http" {
   }
 }
 
+resource "aws_lb_listener_rule" "override" {
+  for_each = var.path_overrides
+
+  listener_arn = aws_lb_listener.http.arn
+  priority     = each.value.priority
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.this[each.value.service].arn
+  }
+
+  condition {
+    path_pattern {
+      values = each.value.paths
+    }
+  }
+}
+
 resource "aws_lb_listener_rule" "this" {
   for_each = var.services
 
