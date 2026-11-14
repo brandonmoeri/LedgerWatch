@@ -4,6 +4,7 @@ const REJECTION_LABELS: Record<TransactionRejectionReason, string> = {
   ACCOUNT_NOT_FOUND: 'Account not found',
   ACCOUNT_NOT_ACTIVE: 'Account is frozen or closed',
   INSUFFICIENT_FUNDS: 'Insufficient funds',
+  SUSPECTED_FRAUD: 'Blocked as suspected fraud',
 };
 
 export interface TransactionStatusBadgeProps {

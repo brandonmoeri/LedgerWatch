@@ -91,13 +91,14 @@ transaction-service registers its own Micrometer meters, all prefixed `ledgerwat
 | Meter | Type | Tags | Meaning |
 |---|---|---|---|
 | `ledgerwatch.transactions.posted` | Counter | `type` | Transactions settled POSTED |
-| `ledgerwatch.transactions.rejected` | Counter | `reason` | Transactions settled REJECTED (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`) |
-| `ledgerwatch.outbox.lag` | Time gauge (s) | — | Age of the oldest undelivered outbox event; 0 when the outbox is drained |
+| `ledgerwatch.transactions.rejected` | Counter | `reason` | Transactions settled REJECTED (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`, `SUSPECTED_FRAUD`) |
+| `ledgerwatch.fraud.signals` | Counter | `rule` | Fraud rule hits (`VELOCITY`, `AMOUNT_SPIKE`, `NEW_ACCOUNT_LARGE_DEBIT`), counted once per transaction in both `ENFORCE` and `MONITOR` mode |
+| `ledgerwatch.outbox.lag` | Time gauge (s; ms in CloudWatch) | — | Age of the oldest undelivered outbox event; 0 when the outbox is drained |
 | `ledgerwatch.outbox.pending` | Gauge | — | Undelivered outbox events |
 
 - **Counters** (`TransactionMetrics`) are incremented by `OutboxPublisher` after the status update commits, and only if `markPosted`/`markRejected` actually moved the row out of PENDING, so a redelivered event isn't counted twice. Every tag value is registered at startup, so idle series report 0 rather than no data.
 - **Gauges** (`OutboxBacklogMetrics`) query `outbox_event` each time they're sampled. "Undelivered" means neither published nor parked: events backing off after a transient failure count, parked ones don't. Lag is the signal to alarm on: it climbs steadily while account-service is down or the publisher has stalled, even if only one event is waiting.
-- **Export:** with `metrics.cloudwatch.enabled=true`, `CloudWatchMetricsConfig` pushes to CloudWatch every minute (`metrics.cloudwatch.step`) under namespace `LedgerWatch`, with dimension `application=transaction-service`. Boot 3.3 has no CloudWatch auto-configuration, so the registry is declared there. It filters out everything not prefixed `ledgerwatch.`, because CloudWatch bills each name/dimension combination as a custom metric. In CloudWatch, counters appear as `<name>.count` (Sum per minute = transactions settled that minute) and gauges as `<name>.value`. Export is off locally; `GET /actuator/metrics/ledgerwatch.outbox.lag` (ADMIN) shows the same values.
+- **Export:** with `metrics.cloudwatch.enabled=true`, `CloudWatchMetricsConfig` pushes to CloudWatch every minute (`metrics.cloudwatch.step`) under namespace `LedgerWatch`, with dimension `application=transaction-service`. Boot 3.3 has no CloudWatch auto-configuration, so the registry is declared there. It filters out everything not prefixed `ledgerwatch.`, because CloudWatch bills each name/dimension combination as a custom metric. In CloudWatch, counters appear as `<name>.count` (Sum per minute = transactions settled that minute) and gauges as `<name>.value`. The CloudWatch registry publishes time gauges in its base unit, milliseconds, so `ledgerwatch.outbox.lag.value` is in ms there, and the dashboard divides by 1000. Export is off locally; `GET /actuator/metrics/ledgerwatch.outbox.lag` (ADMIN) shows the same values.
 
 ---
 
@@ -158,6 +159,7 @@ accounts.account
 | `GET` | `/accounts/{id}` | Any role | Fetch by UUID |
 | `POST` | `/accounts` | `ADMIN` | Create (`ownerName`, optional `initialBalance`) |
 | `PATCH` | `/accounts/{id}` | `ADMIN` | Update `ownerName` and/or `status` |
+| `GET` | `/internal/accounts/{id}` | `SERVICE` | Internal. The account, including `createdAt`; transaction-service's fraud rules use it to judge account age. 404 if unknown |
 | `POST` | `/internal/accounts/{id}/balance-adjustments` | `SERVICE` | Internal. Apply a signed `delta` (non-zero, ≤4 dp). 422 (insufficient funds) if a negative delta would take the balance below zero; a debit down to exactly 0 is allowed, and credits are never blocked. 409 if the account is `FROZEN`/`CLOSED`. Optimistic-lock conflicts are retried server-side, each attempt in a fresh transaction with jittered exponential backoff (`balance-retry.max-attempts` 10, `initial-backoff` 5ms, `max-backoff` 200ms). 409 only if every attempt conflicts |
 
 #### Configuration
@@ -189,6 +191,7 @@ PENDING ──> POSTED ──> VOIDED     (VOIDED: PATCH by an ADMIN)
 
 | Publisher outcome | Transaction | Outbox row |
 |---|---|---|
+| Fraud rules block it (checked before account-service is called) | `REJECTED`, `SUSPECTED_FRAUD` | parked |
 | account-service accepts the change | `POSTED` | `published_at` set |
 | `404` no such account | `REJECTED`, `ACCOUNT_NOT_FOUND` | parked |
 | `409` with type `urn:ledgerwatch:problem:account-not-active` | `REJECTED`, `ACCOUNT_NOT_ACTIVE` | parked |
@@ -226,6 +229,7 @@ sequenceDiagram
         TxDB-->>Pub: Up to batch-size events
 
         loop Each event, outside any DB transaction
+            Pub->>TxDB: Fraud rules: reuse stored verdict or evaluate and store it, with a flag per hit<br/>Blocked: PENDING to REJECTED (SUSPECTED_FRAUD), parked, next event
             Pub->>Acct: POST /internal/accounts/{id}/balance-adjustments<br/>adjustmentId = transaction id, signed delta
             Acct->>AcctDB: Known adjustmentId: replay, no change<br/>Otherwise check ACTIVE and funds, then<br/>update balance and insert balance_adjustment
 
@@ -259,6 +263,21 @@ sequenceDiagram
 - **Client:** `AccountServiceClient`, a Spring `RestClient` on the JDK `HttpClient` (HTTP/1.1). Configured under `account-service.*`: `base-url` (`ACCOUNT_SERVICE_URL`, default `http://localhost:8081`), `connect-timeout` (default `2s`) and `read-timeout` (default `5s`).
 - **Auth:** `ServiceTokenProvider` mints its own HS256 JWT (`sub: transaction-service`, `roles: ["SERVICE"]`, 5-minute TTL, cached and re-minted 60 s before expiry) with the shared `JWT_SECRET`.
 - **Telling 409s apart:** account-service reports a FROZEN or CLOSED account as `AccountNotActiveException`, with the problem type `urn:ledgerwatch:problem:account-not-active`. Every other `409` becomes `AccountServiceConflictException`, which is worth retrying later. It doesn't count against the circuit breaker, because account-service is healthy.
+
+#### Fraud rules
+
+Before sending a transaction's balance change, `OutboxPublisher` passes it to `FraudRuleEngine`, which runs every `FraudRule` bean (strategy pattern; add a rule by adding a `@Component` that implements it). Every rule runs, so all reasons are recorded, not just the first. Each rule judges the transaction as of its `createdAt`, not the time it's delivered.
+
+| Rule | Fires when | Config (`fraud.*`, defaults) |
+|---|---|---|
+| `VELOCITY` | The account has more than `max-transactions` transactions (any type or status, counting this one) in the `window` up to this one | `velocity.max-transactions: 10`, `velocity.window: 10m` |
+| `AMOUNT_SPIKE` | The amount exceeds `multiplier` × the average of the account's `POSTED` transactions **of the same type** in the `lookback` before it. Skipped with fewer than `min-history` of them | `amount-spike.multiplier: 3`, `lookback: 30d`, `min-history: 3` |
+| `NEW_ACCOUNT_LARGE_DEBIT` | A `DEBIT` of at least `large-debit-threshold` from an account younger than `max-age`. Calls account-service's `GET /internal/accounts/{id}`, but only for debits at or over the threshold | `new-account.max-age: 24h`, `large-debit-threshold: 1000` |
+
+- **Mode:** `fraud.mode` (`FRAUD_RULES_MODE`) is `enforce` by default: any hit rejects the transaction as `SUSPECTED_FRAUD` and account-service is never called. `monitor` records hits and posts the transaction anyway, for trying thresholds on live traffic. `fraud.enabled` (`FRAUD_RULES_ENABLED`) turns screening off.
+- **Stored verdict:** each verdict is written to `fraud_screening` before the balance call. A redelivered event reuses it instead of re-running the rules, whose inputs (such as the 30-day average) may have changed, so a transaction can't post on one attempt and be rejected on the next after its balance has already moved.
+- **Flags:** each signal is also written as a `fraud_flag` row, with the account id and the verdict's `blocked`, in the same DB transaction as the verdict, so a replay never adds flags and a crash never leaves a verdict without them. `GET /accounts/{id}/flags` lists them for review, and each transaction in `GET /transactions` and `GET /transactions/{id}` carries its own as `flags` (`rule`, `detail`), loaded with one query per page. Flags record `MONITOR`-mode hits too (`blocked: false`), which is what makes that mode useful for tuning. `fraud_screening.signals` is kept as the replay record, so instances on the previous release keep working during a rolling deploy.
+- **Failures:** if the account lookup fails, the event is handled like any failed account-service call: backoff for an outage, `ACCOUNT_NOT_FOUND` for a 404. Nothing is stored, so the rules run again on the retry.
 
 #### Transactional outbox
 
@@ -322,15 +341,35 @@ transactions.outbox_event                             -- V3
   failed_at      TIMESTAMPTZ                           -- V4: parked; never retried
   correlation_id VARCHAR(128)                          -- V6: id of the request that wrote it
   INDEX (next_attempt_at, created_at) WHERE published_at IS NULL AND failed_at IS NULL
+
+transactions.fraud_screening                          -- V7
+  transaction_id UUID PK                               -- no FK, like outbox_event
+  blocked        BOOLEAN NOT NULL                      -- true: rejected as SUSPECTED_FRAUD
+  signals        JSONB NOT NULL                        -- [{"rule", "detail"}], [] if clear
+  screened_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  INDEX (screened_at) WHERE signals <> '[]'            -- flagged only
+-- V7 also adds INDEX transaction(account_id, created_at) for the rules' lookups
+
+transactions.fraud_flag                               -- V8: one row per signal; back-filled from V7's signals
+  id             UUID PK DEFAULT gen_random_uuid()
+  transaction_id UUID NOT NULL FK → fraud_screening ON DELETE CASCADE
+  account_id     UUID NOT NULL
+  rule           VARCHAR(64) NOT NULL                  -- FraudRule.name()
+  detail         TEXT NOT NULL
+  blocked        BOOLEAN NOT NULL                      -- the screening's verdict
+  flagged_at     TIMESTAMPTZ NOT NULL DEFAULT now()    -- = screened_at
+  UNIQUE (transaction_id, rule)
+  INDEX (account_id, flagged_at DESC, id)
 ```
 
 #### REST API
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| `GET` | `/transactions` | Any role | List transactions |
-| `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
+| `GET` | `/transactions` | Any role | List transactions. Each has `flags`: the fraud rules that fired on it (`rule`, `detail`), empty if none or still `PENDING` |
+| `GET` | `/transactions/{id}` | Any role | Fetch by UUID, with `flags` as above |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
+| `GET` | `/accounts/{id}/flags` | Any role | The account's fraud flags, newest first, paged (`page`, `size`, `sort`). Each has `transactionId`, `rule`, `detail`, `blocked` (rejected, or posted in `MONITOR` mode) and `flaggedAt`. Empty page if none. Lives here, not in account-service, because the flags do; the ALB routes this one path accordingly |
 | `POST` | `/transactions` | `ADMIN` | Accept (`accountId`, `type`, `amount` ≤4 dp, optional `description`): `202` with status `PENDING`. The outcome arrives later as `POSTED` or `REJECTED` with a `rejectionReason`; see [Transaction lifecycle](#transaction-lifecycle). Optional `Idempotency-Key` header: replays the original 202, 422 if reused with a different body |
 | `PATCH` | `/transactions/{id}` | `ADMIN` | Update `description`, or void a `POSTED` transaction with `status: VOIDED`. 409 for any other status change, or if the transaction is `VOIDED` or `REJECTED` |
 
@@ -348,7 +387,7 @@ A single `ledgerwatch` Postgres 16 database hosts both services under isolated s
 
 Each service owns its schema through Flyway. On startup, Spring Boot's Flyway auto-configuration applies `src/main/resources/db/migration/V*__*.sql` to that service's schema (`spring.flyway.schemas` / `default-schema`) and records history in a per-schema `flyway_schema_history` table, so the two services migrate independently against the same database.
 
-- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`.
+- `V1__baseline.sql` in each service creates the schema, grants it to the `ledger` role, and creates the table shown above. Later migrations: account-service `V2__account_version.sql`; transaction-service `V2__idempotency_record.sql`, `V3__outbox_event.sql`, `V4__outbox_delivery_state.sql`, `V5__transaction_lifecycle.sql`, `V6__outbox_correlation_id.sql`, `V7__fraud_screening.sql`, `V8__fraud_flag.sql`.
 - Hibernate never generates DDL. account-service uses `ddl-auto: none`; transaction-service uses `validate` so it fails fast if entities drift from the migrated schema.
 - `docker/postgres/init.sql` only enables `pgcrypto`; it no longer creates schemas or tables.
 - Schema changes go in a new `V<n>__description.sql` in the owning service. Never edit an applied migration.
@@ -379,18 +418,23 @@ frontend/src/
 ├── api/
 │   ├── client.ts       # Axios instance — baseURL /api, 10 s timeout, Bearer token interceptors
 │   ├── auth.ts         # POST /auth/login
-│   └── accounts.ts     # Typed wrappers around account-service CRUD endpoints
+│   ├── accounts.ts     # Typed wrappers around account-service CRUD endpoints
+│   └── fraudFlags.ts   # GET /accounts/{id}/flags (served by transaction-service)
 ├── auth/
 │   ├── auth.ts         # JWT storage (localStorage), payload decode, expiry check
 │   └── RequireAuth.tsx # Route guard — redirects to /login when no valid token
 ├── pages/
 │   ├── LoginPage.tsx               # Username/password form → stores JWT
 │   ├── AccountsDashboardPage.tsx   # Lists all accounts via RTK thunk
-│   ├── AccountDetailPage.tsx       # Single account view + PATCH form
+│   ├── AccountDetailPage.tsx       # Single account view + PATCH form + fraud flags panel
 │   └── CreateAccountPage.tsx       # POST /accounts form
+├── components/
+│   ├── FraudFlagBadges.tsx    # One badge per fraud rule on a transaction (Transactions page)
+│   └── AccountFlagsPanel.tsx  # Paged table of an account's fraud flags: rule, detail, blocked or monitored
 ├── store/
-│   ├── store.ts           # RTK store — single `accounts` slice
-│   └── accountsSlice.ts   # Async thunks: fetchAccounts, fetchAccountById, updateAccount
+│   ├── store.ts              # RTK store
+│   ├── accountsSlice.ts      # Async thunks: fetchAccounts, fetchAccountById, updateAccount
+│   └── accountFlagsSlice.ts  # fetchAccountFlags; drops answers to superseded requests
 └── types/
     └── account.ts         # Account, UpdateAccountRequest interfaces
 ```
@@ -401,7 +445,7 @@ frontend/src/
 
 ### Dev proxy
 
-Vite rewrites `/api/*` → `http://localhost:8081/*` (strips `/api` prefix), so the SPA and account-service share the same origin in development without CORS configuration.
+Vite strips the `/api` prefix and routes like the ALB: `/api/transactions*` and `/api/accounts/{id}/flags` → transaction-service (`http://localhost:8082`), everything else → account-service (`http://localhost:8081`). The SPA and both services share one origin in development without CORS configuration.
 
 ### Testing
 
@@ -411,14 +455,15 @@ Vitest + jsdom + `@testing-library/react`. Test setup in `src/test/setup.ts`.
 
 ## Infrastructure (AWS)
 
-Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service, transaction-service and the React SPA**. The root module wires five local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
+Terraform config in `infra/aws/` (Terraform ≥ 1.11, AWS provider ~5.0) deploys **account-service, transaction-service and the React SPA**. The root module wires six local modules together, and owns the ECS cluster, Cloud Map namespace and JWT secret that both services share:
 
 | Module | Owns |
 |---|---|
 | `modules/network` | VPC, internet gateway, public subnets, route table |
 | `modules/rds` | Postgres instance, subnet group, security group, DB credentials secret |
-| `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service |
+| `modules/alb` | Load balancer, its security group, HTTP listener, one target group and path rule per service, plus `path_overrides` for paths under another service's prefix (`/accounts/*/flags` → transaction-service) |
 | `modules/frontend` | Private S3 bucket for the SPA build, CloudFront distribution (S3 + ALB origins), origin access control, two CloudFront Functions |
+| `modules/monitoring` | CloudWatch dashboard, alarms on each service's 5xx rate, ALB-generated 5xx and outbox lag, and the SNS topic they notify (optional email subscription via `alarm_email`) |
 | `modules/ecs-service` | One service: ECR repository, log group, execution role, optional task role (with `metrics_namespace`), security group, Cloud Map record, task definition, ECS service |
 
 The two services are separate `ecs-service` module calls rather than a `for_each`, because they reference each other: account-service allows ingress from transaction-service's security group, and transaction-service reads account-service's internal URL.
@@ -440,6 +485,7 @@ The two services are separate `ecs-service` module calls rather than a `for_each
 | **Cloud Map** | Private DNS namespace `ledgerwatch.local`; transaction-service calls `http://account-service.ledgerwatch.local:8081` via `ACCOUNT_SERVICE_URL` |
 | **RDS** | Postgres 16, `db.t4g.micro`, 20 GB gp3, single-AZ, publicly accessible, no final snapshot |
 | **CloudWatch metrics** | transaction-service pushes 7 custom metrics to namespace `LedgerWatch` once a minute. Its task role (`ledgerwatch-transaction-service-task`) may call `cloudwatch:PutMetricData` only with that namespace (a `cloudwatch:namespace` condition, since the action has no resource-level permissions) |
+| **CloudWatch alarms** | `ledgerwatch-<service>-5xx-rate`: target 5xx ÷ `RequestCount` per target group, a metric-math `IF` that reads 0 below 10 requests in the 5-minute window. `ledgerwatch-alb-5xx`: a count of `HTTPCode_ELB_5XX_Count`, since requests rejected before a target is chosen aren't in `RequestCount`. `ledgerwatch-outbox-lag`: Maximum of `ledgerwatch.outbox.lag.value` > 300 000 ms for 3 of 3 minutes; missing data stays missing, so a paused service doesn't look healthy or broken. All notify the `ledgerwatch-alarms` SNS topic on ALARM and OK |
 | **Secrets Manager** | `ledgerwatch/db` stores `url`, `username`, `password` JSON; `ledgerwatch/jwt` stores the shared HMAC key. Each service's task execution role reads them at startup |
 | **Security groups** | One per service: all egress open; ingress on the container port from the ALB, plus the optional `admin_cidr` variable. account-service also allows `8081` from transaction-service. RDS: inbound `5432` from both service SGs (and optional `admin_cidr`) |
 

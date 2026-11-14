@@ -35,6 +35,7 @@ const mockTransaction: Transaction = {
     description: 'Coffee',
     createdAt: '2024-01-15T10:00:00Z',
     updatedAt: '2024-01-15T10:00:00Z',
+    flags: [],
 };
 
 const pagedResponse = (items: Transaction[]): PagedResponse<Transaction> => ({

@@ -167,7 +167,8 @@ class TransactionServiceTest {
             new BigDecimal("10.50"),
             null,
             Instant.parse("2026-01-01T00:00:00Z"),
-            Instant.parse("2026-01-01T00:00:00Z"));
+            Instant.parse("2026-01-01T00:00:00Z"),
+            List.of());
     ArgumentCaptor<String> hash = ArgumentCaptor.forClass(String.class);
     when(idempotencyRecordRepository.claim(eq("admin"), eq("key-1"), hash.capture())).thenReturn(0);
     String originalJson = objectMapper.writeValueAsString(original);
@@ -187,6 +188,33 @@ class TransactionServiceTest {
     assertThat(result.replayed()).isTrue();
     assertThat(result.response()).isEqualTo(original);
     verify(transactionRepository, never()).saveAndFlush(any());
+  }
+
+  @Test
+  void createIdempotent_replaysAResponseStoredBeforeFlagsExisted_withNoFlags() {
+    var request =
+        new CreateTransactionRequest(
+            UUID.randomUUID(), TransactionType.CREDIT, new BigDecimal("10.50"), null);
+    ArgumentCaptor<String> hash = ArgumentCaptor.forClass(String.class);
+    when(idempotencyRecordRepository.claim(eq("admin"), eq("key-1"), hash.capture())).thenReturn(0);
+    IdempotencyRecord stored = mock(IdempotencyRecord.class);
+    when(stored.getRequestHash()).thenAnswer(inv -> hash.getValue());
+    when(stored.getResponseBody())
+        .thenReturn(
+            """
+            {"id": "%s", "accountId": "%s", "type": "CREDIT", "status": "PENDING",
+             "rejectionReason": null, "amount": 10.50, "description": null,
+             "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z"}
+            """
+                .formatted(UUID.randomUUID(), request.accountId()));
+    when(idempotencyRecordRepository.findByCallerAndIdempotencyKey("admin", "key-1"))
+        .thenReturn(Optional.of(stored));
+
+    CreateTransactionResult result =
+        transactionService.createTransaction(request, "admin", "key-1");
+
+    assertThat(result.replayed()).isTrue();
+    assertThat(result.response().flags()).isEmpty();
   }
 
   @Test

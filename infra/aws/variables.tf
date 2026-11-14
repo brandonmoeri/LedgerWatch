@@ -27,3 +27,9 @@ variable "admin_cidr" {
   type        = string
   default     = ""
 }
+
+variable "alarm_email" {
+  description = "Email address for CloudWatch alarm notifications (confirm the subscription from the email AWS sends). Leave empty to create the alarms without a subscriber."
+  type        = string
+  default     = ""
+}

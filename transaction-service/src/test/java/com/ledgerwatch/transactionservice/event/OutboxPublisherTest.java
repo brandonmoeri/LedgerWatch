@@ -16,6 +16,10 @@ import com.ledgerwatch.transactionservice.client.AccountServiceUnavailableExcept
 import com.ledgerwatch.transactionservice.domain.OutboxEvent;
 import com.ledgerwatch.transactionservice.domain.TransactionRejectionReason;
 import com.ledgerwatch.transactionservice.domain.TransactionType;
+import com.ledgerwatch.transactionservice.fraud.FraudContext;
+import com.ledgerwatch.transactionservice.fraud.FraudRuleEngine;
+import com.ledgerwatch.transactionservice.fraud.FraudSignal;
+import com.ledgerwatch.transactionservice.fraud.FraudVerdict;
 import com.ledgerwatch.transactionservice.metrics.TransactionMetrics;
 import com.ledgerwatch.transactionservice.repository.OutboxEventRepository;
 import com.ledgerwatch.transactionservice.repository.TransactionRepository;
@@ -33,6 +37,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -55,6 +60,7 @@ class OutboxPublisherTest {
   @Mock OutboxEventRepository repo;
   @Mock TransactionRepository transactionRepo;
   @Mock AccountServiceClient accountServiceClient;
+  @Mock FraudRuleEngine fraudRules;
 
   private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
   private CircuitBreakerRegistry circuitBreakerRegistry;
@@ -65,6 +71,7 @@ class OutboxPublisherTest {
   void setUp() {
     circuitBreakerRegistry = CircuitBreakerRegistry.ofDefaults();
     meterRegistry = new SimpleMeterRegistry();
+    lenient().when(fraudRules.screen(any())).thenReturn(FraudVerdict.CLEAR);
     publisher =
         new OutboxPublisher(
             repo,
@@ -75,6 +82,7 @@ class OutboxPublisherTest {
             objectMapper,
             PROPERTIES,
             new TransactionMetrics(meterRegistry),
+            fraudRules,
             Clock.fixed(NOW, ZoneOffset.UTC));
   }
 
@@ -155,6 +163,79 @@ class OutboxPublisherTest {
     publisher.publishPending();
 
     assertThat(dueWhileDelivering[0]).isEqualTo(NOW.plus(PROPERTIES.lease()));
+  }
+
+  @Test
+  void screensTheTransactionAsCreated_beforeDelivering() throws Exception {
+    UUID transactionId = UUID.randomUUID();
+    UUID accountId = UUID.randomUUID();
+    OutboxEvent event = event(transactionId, accountId, TransactionType.DEBIT, "12.34");
+    due(event);
+
+    publisher.publishPending();
+
+    ArgumentCaptor<FraudContext> context = ArgumentCaptor.forClass(FraudContext.class);
+    var order = inOrder(fraudRules, accountServiceClient);
+    order.verify(fraudRules).screen(context.capture());
+    order.verify(accountServiceClient).applyBalanceDelta(any(), any(), any());
+    assertThat(context.getValue().transactionId()).isEqualTo(transactionId);
+    assertThat(context.getValue().accountId()).isEqualTo(accountId);
+    assertThat(context.getValue().type()).isEqualTo(TransactionType.DEBIT);
+    assertThat(context.getValue().amount()).isEqualByComparingTo("12.34");
+    assertThat(context.getValue().createdAt()).isEqualTo(NOW.minusSeconds(5));
+    // The account is only fetched if a rule asks for it.
+    verify(accountServiceClient, never()).getAccount(any());
+  }
+
+  @Test
+  void blockedByFraudRules_rejectsWithoutTouchingTheBalance() throws Exception {
+    UUID transactionId = UUID.randomUUID();
+    OutboxEvent event = event(transactionId, UUID.randomUUID(), TransactionType.DEBIT, "5000");
+    due(event);
+    when(fraudRules.screen(any()))
+        .thenReturn(
+            new FraudVerdict(List.of(new FraudSignal("VELOCITY", "11 transactions")), true));
+    when(transactionRepo.markRejected(
+            transactionId, TransactionRejectionReason.SUSPECTED_FRAUD, NOW))
+        .thenReturn(1);
+
+    publisher.publishPending();
+
+    verify(accountServiceClient, never()).applyBalanceDelta(any(), any(), any());
+    assertThat(event.getFailedAt()).isEqualTo(NOW);
+    assertThat(event.getPublishedAt()).isNull();
+    assertThat(event.getLastError()).contains("VELOCITY").contains("11 transactions");
+    assertThat(rejected(TransactionRejectionReason.SUSPECTED_FRAUD)).isEqualTo(1);
+  }
+
+  @Test
+  void flaggedButNotBlocked_isDelivered() throws Exception {
+    UUID transactionId = UUID.randomUUID();
+    OutboxEvent event = event(transactionId, UUID.randomUUID(), TransactionType.DEBIT, "5000");
+    due(event);
+    when(fraudRules.screen(any()))
+        .thenReturn(
+            new FraudVerdict(List.of(new FraudSignal("AMOUNT_SPIKE", "monitor only")), false));
+
+    publisher.publishPending();
+
+    verify(accountServiceClient).applyBalanceDelta(any(), any(), any());
+    verify(transactionRepo).markPosted(transactionId, NOW);
+  }
+
+  @Test
+  void accountLookupUnavailableDuringScreening_backsOff() throws Exception {
+    OutboxEvent event = event();
+    due(event);
+    when(fraudRules.screen(any()))
+        .thenThrow(new AccountServiceUnavailableException("account-service returned 503"));
+
+    publisher.publishPending();
+
+    assertThat(event.getFailedAt()).isNull();
+    assertThat(event.getAttempts()).isEqualTo(1);
+    verify(accountServiceClient, never()).applyBalanceDelta(any(), any(), any());
+    verifyNoInteractions(transactionRepo);
   }
 
   @Test

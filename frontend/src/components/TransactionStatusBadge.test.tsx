@@ -18,6 +18,7 @@ describe('TransactionStatusBadge', () => {
         ['ACCOUNT_NOT_FOUND', 'Account not found'],
         ['ACCOUNT_NOT_ACTIVE', 'Account is frozen or closed'],
         ['INSUFFICIENT_FUNDS', 'Insufficient funds'],
+        ['SUSPECTED_FRAUD', 'Blocked as suspected fraud'],
     ])('explains a %s rejection', (rejectionReason, label) => {
         render(<TransactionStatusBadge status="REJECTED" rejectionReason={rejectionReason} />);
         expect(screen.getByText(label)).toBeInTheDocument();

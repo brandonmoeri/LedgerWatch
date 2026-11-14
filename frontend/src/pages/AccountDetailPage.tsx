@@ -5,6 +5,7 @@ import { fetchAccountById, updateAccount } from '../store/accountsSlice';
 import type { AppDispatch, RootState } from '../store/store';
 import type { AccountStatus } from '../types/account';
 import Skeleton from '../components/Skeleton';
+import AccountFlagsPanel from '../components/AccountFlagsPanel';
 
 export default function AccountDetailPage() {
     const { id } = useParams<{ id: string }>();
@@ -87,6 +88,7 @@ export default function AccountDetailPage() {
                     <button onClick={() => setEditing(true)}>Edit</button>
                 </>
             )}
+            <AccountFlagsPanel accountId={account.id} />
         </div>
     );
 }

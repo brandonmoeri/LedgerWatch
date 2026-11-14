@@ -9,7 +9,7 @@ A banking microservice platform for tracking accounts and transactions, built as
 | `account-service` (Spring Boot 3.3, Java 21) | **Functional** — full account CRUD REST API, JPA persistence, validation, unit + integration tests |
 | `transaction-service` (Spring Boot 3.3, Java 21) | **Functional** — full transaction CRUD REST API, JPA persistence, validation, unit + integration tests |
 | Postgres + both services (local, via Docker Compose) | Running — `accounts` and `transactions` schemas owned by per-service Flyway migrations |
-| React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create, and transactions pages; Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
+| React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create (with a fraud flags panel), and transactions pages (with fraud flag badges); Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
 | CI/CD | **CI functional** — GitHub Actions on PRs to `master`/`dev`: path-filtered per-service Spotless check + `mvn verify` (JaCoCo 70% coverage gate), frontend type check + lint + Vitest; Docker images published to GHCR on push to `dev`. AWS access from Actions via OIDC (no stored keys); deployment (CD) not started |
 | AWS infra | IaC ready (Terraform modules, `infra/aws/`) for both services on ECS Fargate + RDS. `account-service` was deployed and CRUD-verified on the earlier single-service config, then torn down; the two-service config has been planned but not yet applied |
 
@@ -34,6 +34,7 @@ LedgerWatch/
 ├── frontend/                 # React/TS SPA — Vite, Redux Toolkit, React Router
 ├── docker/postgres/init.sql  # Schema seed (accounts + transactions schemas)
 ├── docker-compose.yml        # Postgres + account-service + transaction-service
+├── scripts/seed/             # Demo data + fraud ground-truth labels (make seed)
 ├── infra/aws/                # Terraform — AWS deployment (network, alb, ecs-service, rds, frontend modules)
 └── pom.xml                   # Maven parent (Java 21, Spring Boot 3.3.4)
 ```
@@ -53,6 +54,28 @@ cd frontend && npm install && npm run dev
 
 To run a service outside its container (e.g. for debugging), stop it in Compose and run it directly from the repo root: `mvn -pl account-service spring-boot:run` or `mvn -pl transaction-service spring-boot:run`.
 
+### Demo data
+
+`make seed` loads about six months of history (20 accounts, ~5,000 transactions) into the running Postgres. Start the services once first, so Flyway has created the schemas. The data includes everyday customers, two small businesses, and a set of planted scenarios with known answers:
+
+| Scenario | Kind | Rules |
+|---|---|---|
+| Card testing: 14 sub-$5 charges in 7 minutes at 2am | fraud | partly caught (`VELOCITY` from the 11th) |
+| Account takeover of a retiree, then a freeze | fraud | caught (`AMOUNT_SPIKE`) |
+| New-account bust-out with a returned check, $950 withdrawals kept under the $1,000 threshold | fraud | partly caught |
+| Structuring: cash deposits of $8,700–$9,900 at a business | fraud | missed |
+| Money mule: inbound payments forwarded out within hours | fraud | partly caught |
+| Dormant account suddenly sending money to crypto | fraud | missed |
+| Annual bonus, car down payment, home-sale proceeds into a new account, POS batch catch-up, a holiday abroad, an account closure | benign | some are false positives |
+
+The script (`scripts/seed/seed_demo_data.py`, Python 3.9+, standard library only) writes SQL directly instead of calling the API, because `POST /transactions` can't backdate `created_at`. To keep the history consistent with what the services would produce, it runs the three fraud rules with the default `fraud.*` settings and settles each transaction the way account-service would. Every seeded transaction therefore has its `fraud_screening` row and its `fraud_flag` rows, and each account's balance equals the sum of its `POSTED` transactions. Re-running replaces the previous seed and leaves other rows alone. `make seed-purge` removes it.
+
+Flagged transactions are seeded as **`MONITOR`-mode** hits: they post, with `blocked: false`. Under `ENFORCE`, `AMOUNT_SPIKE` would reject about 12% of ordinary spending (rent, utilities, a big grocery shop) against coffee-sized averages. To seed that instead, run `make seed SEED_ARGS="--fraud-mode enforce"`.
+
+Without `make`: `python scripts/seed/seed_demo_data.py | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U ledger -d ledgerwatch`.
+
+Ground truth goes to `scripts/seed/out/labels.json` (git-ignored). It contains every scenario with its transaction ids, every flag marked as a true or false positive with a reason, and the fraud transactions no rule caught. The data ends yesterday (UTC) by default. Pass `SEED_ARGS="--end 2026-11-13"` to reproduce a dataset exactly: the same `--seed`, `--days`, `--end` and `--fraud-mode` always give identical data and labels.
+
 ## APIs
 
 **`account-service`** (`http://localhost:8081`)
@@ -70,16 +93,17 @@ Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/transactions` | List all transactions |
+| `GET` | `/transactions` | List all transactions, each with the fraud rules that fired on it (`flags`) |
 | `GET` | `/transactions/{id}` | Fetch transaction by UUID |
 | `POST` | `/transactions` | Accept a transaction (`accountId`, `type`, `amount`, optional `description`) and return `202` with status `PENDING`; send an `Idempotency-Key` header to make retries safe |
 | `PATCH` | `/transactions/{id}` | Update `description`, or void a `POSTED` transaction |
+| `GET` | `/accounts/{id}/flags` | The account's fraud flags (rules that fired on its transactions), newest first |
 
-Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`, `VOIDED`. The balance is applied asynchronously: poll `GET /transactions/{id}` until the status is `POSTED` or `REJECTED`, which comes with a `rejectionReason` (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE` or `INSUFFICIENT_FUNDS`).
+Transaction types: `CREDIT`, `DEBIT`. Statuses: `PENDING`, `POSTED`, `REJECTED`, `VOIDED`. The balance is applied asynchronously: poll `GET /transactions/{id}` until the status is `POSTED` or `REJECTED`, which comes with a `rejectionReason` (`ACCOUNT_NOT_FOUND`, `ACCOUNT_NOT_ACTIVE`, `INSUFFICIENT_FUNDS`, or `SUSPECTED_FRAUD` when a fraud rule blocked it before posting: see [Fraud rules](ARCHITECTURE.md#fraud-rules)).
 
 ## AWS deployment
 
-Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. An Application Load Balancer is the public entry point: `/accounts` and `/auth` go to `account-service`, `/transactions*` to `transaction-service`, and any other path gets a 404, so `/internal/*` isn't exposed. It listens on plain HTTP only. The React SPA is served from a private S3 bucket through CloudFront over HTTPS. CloudFront also forwards `/api/*` to the ALB with the `/api` prefix stripped, the same as the Vite dev proxy, so the browser talks to a single origin and no CORS is needed. `transaction-service` reaches `account-service` over Cloud Map private DNS. No NAT Gateway (cost-minimized).
+Terraform config in `infra/aws/` deploys `account-service` and `transaction-service` from one shared `ecs-service` module: ECR → ECS Fargate → RDS Postgres, with DB credentials and the JWT key via Secrets Manager. An Application Load Balancer is the public entry point: `/accounts` and `/auth` go to `account-service`, `/transactions*` and `/accounts/*/flags` to `transaction-service`, and any other path gets a 404, so `/internal/*` isn't exposed. It listens on plain HTTP only. The React SPA is served from a private S3 bucket through CloudFront over HTTPS. CloudFront also forwards `/api/*` to the ALB with the `/api` prefix stripped, the same as the Vite dev proxy, so the browser talks to a single origin and no CORS is needed. `transaction-service` reaches `account-service` over Cloud Map private DNS. No NAT Gateway (cost-minimized).
 
 ### Remote state
 
@@ -136,7 +160,7 @@ docker push <transaction-service-repo-url>:latest
 
 terraform apply -var "admin_cidr=<your-ip>/32" -target=module.rds
 docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<rds_endpoint>:5432/ledgerwatch?sslmode=require" < docker/postgres/init.sql  # from the repo root
-terraform apply -var "admin_cidr=<your-ip>/32"
+terraform apply -var "admin_cidr=<your-ip>/32" -var "alarm_email=<you@example.com>"  # alarm_email is optional
 curl -i "$(terraform output -raw alb_url)/accounts"  # 401 from account-service means routing works
 ```
 
@@ -167,8 +191,8 @@ The stack has three states, and the right one depends on whether anyone needs to
 
 | State | Cost | Live URL | Time to full service |
 |---|---|---|---|
-| **Running** | ~$90/mo (~$2.95/day) | Works | — |
-| **Paused** (tasks at 0, RDS stopped) | ~$28/mo | Same URL; the SPA loads but every API call fails | ~10 min |
+| **Running** | ~$91/mo (~$2.97/day) | Works | — |
+| **Paused** (tasks at 0, RDS stopped) | ~$29/mo | Same URL; the SPA loads but every API call fails | ~10 min |
 | **Torn down** | < $0.10/mo | Gone; a new CloudFront URL is created on the next bring-up | ~30 min, partly manual |
 
 #### Monthly cost estimate
@@ -183,11 +207,24 @@ These are us-east-1 on-demand list prices with no free tier, at 730 hours a mont
 | RDS `db.t4g.micro` + 20 GB gp3 | $13.98 | $2.30 | Compute $11.68 + storage $2.30. A stopped instance is billed for storage only |
 | Secrets Manager (2 secrets), Cloud Map / Route 53 private zone, ECR, CloudWatch Logs | ~$2 | ~$2 | ECR grows with every deploy's `:<sha>` tag (no lifecycle policy yet) |
 | CloudWatch custom metrics (7) + `PutMetricData` | ~$2.55 | $0 | $0.30 per metric plus one request a minute per task ($0.44). Only `ledgerwatch.*` meters are shipped; Boot's own would add a few hundred. Billed only for hours a task is pushing |
+| CloudWatch alarms (4) + dashboard | $0.60 | $0.60 | Alarms bill $0.10 per metric they read, and each 5xx-rate alarm reads two. The dashboard is within the free 3 per account (up to 50 metrics each); a fourth would be $3/mo. SNS email is free at this volume |
 | S3 + CloudFront | ~$0 | ~$0 | Within CloudFront's always-free tier |
 | Terraform state bucket | < $0.10 | < $0.10 | Survives teardown (`prevent_destroy`) |
-| **Total** | **~$90** | **~$28** | |
+| **Total** | **~$91** | **~$29** | |
 
 A rolling deploy briefly runs a third task, which costs fractions of a cent. To check the estimate against the bill, look at Cost Explorer grouped by service.
+
+#### Monitoring
+
+`terraform output dashboard_url` opens the `ledgerwatch` CloudWatch dashboard: alarm status, each service's 5xx rate, requests, p95 latency, outbox lag and backlog, and transactions posted/rejected per minute. Every alarm notifies the `ledgerwatch-alarms` SNS topic, on entering ALARM and on recovering. With `alarm_email` set, AWS sends a confirmation email first, and nothing is delivered until you click its link.
+
+| Alarm | Fires when |
+|---|---|
+| `ledgerwatch-<service>-5xx-rate` | More than 5% of the service's requests return 5xx over 5 minutes, once it has had at least 10 requests in that window |
+| `ledgerwatch-alb-5xx` | The ALB itself returns 5+ 5xx in 5 minutes (502/503/504: no healthy tasks, refused connections, timeouts). A count, because AWS leaves requests rejected before a target is chosen out of `RequestCount`, so a rate would read 0 during a full outage |
+| `ledgerwatch-outbox-lag` | The oldest undelivered outbox event is older than 5 minutes for 3 consecutive minutes |
+
+The thresholds are variables of `modules/monitoring`. While the stack is paused, the outbox alarm goes to INSUFFICIENT_DATA without notifying, and `ledgerwatch-alb-5xx` fires if anyone calls the API.
 
 #### Pausing (scale to zero)
 

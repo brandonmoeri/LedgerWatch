@@ -72,6 +72,36 @@ public class InternalAccountControllerIntegrationTest {
   }
 
   @Test
+  void getAccount_returnsAccountWithCreatedAt() throws Exception {
+    var id = seed("100.00", AccountStatus.ACTIVE);
+
+    mockMvc
+        .perform(get("/internal/accounts/{id}", id).with(SERVICE))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.id").value(id.toString()))
+        .andExpect(jsonPath("$.status").value("ACTIVE"))
+        .andExpect(jsonPath("$.createdAt").isNotEmpty());
+  }
+
+  @Test
+  void getAccount_unknownId_returns404() throws Exception {
+    mockMvc
+        .perform(get("/internal/accounts/{id}", UUID.randomUUID()).with(SERVICE))
+        .andExpect(status().isNotFound());
+  }
+
+  @Test
+  void getAccount_requiresServiceRole() throws Exception {
+    var id = seed("100.00", AccountStatus.ACTIVE);
+
+    mockMvc
+        .perform(
+            get("/internal/accounts/{id}", id)
+                .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ADMIN"))))
+        .andExpect(status().isForbidden());
+  }
+
+  @Test
   void positiveDelta_returns200AndPersistsNewBalance() throws Exception {
     var id = seed("100.00", AccountStatus.ACTIVE);
 
