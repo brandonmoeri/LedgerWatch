@@ -4,3 +4,6 @@ target/
 .env.*
 !.env.example
 
+
+# Demo seed output (scripts/seed/seed_demo_data.py)
+scripts/seed/out/

@@ -34,6 +34,7 @@ LedgerWatch/
 ├── frontend/                 # React/TS SPA — Vite, Redux Toolkit, React Router
 ├── docker/postgres/init.sql  # Schema seed (accounts + transactions schemas)
 ├── docker-compose.yml        # Postgres + account-service + transaction-service
+├── scripts/seed/             # Demo data + fraud ground-truth labels (make seed)
 ├── infra/aws/                # Terraform — AWS deployment (network, alb, ecs-service, rds, frontend modules)
 └── pom.xml                   # Maven parent (Java 21, Spring Boot 3.3.4)
 ```
@@ -52,6 +53,28 @@ cd frontend && npm install && npm run dev
 ```
 
 To run a service outside its container (e.g. for debugging), stop it in Compose and run it directly from the repo root: `mvn -pl account-service spring-boot:run` or `mvn -pl transaction-service spring-boot:run`.
+
+### Demo data
+
+`make seed` loads about six months of history (20 accounts, ~5,000 transactions) into the running Postgres. Start the services once first, so Flyway has created the schemas. The data includes everyday customers, two small businesses, and a set of planted scenarios with known answers:
+
+| Scenario | Kind | Rules |
+|---|---|---|
+| Card testing: 14 sub-$5 charges in 7 minutes at 2am | fraud | partly caught (`VELOCITY` from the 11th) |
+| Account takeover of a retiree, then a freeze | fraud | caught (`AMOUNT_SPIKE`) |
+| New-account bust-out with a returned check, $950 withdrawals kept under the $1,000 threshold | fraud | partly caught |
+| Structuring: cash deposits of $8,700–$9,900 at a business | fraud | missed |
+| Money mule: inbound payments forwarded out within hours | fraud | partly caught |
+| Dormant account suddenly sending money to crypto | fraud | missed |
+| Annual bonus, car down payment, home-sale proceeds into a new account, POS batch catch-up, a holiday abroad, an account closure | benign | some are false positives |
+
+The script (`scripts/seed/seed_demo_data.py`, Python 3.9+, standard library only) writes SQL directly instead of calling the API, because `POST /transactions` can't backdate `created_at`. To keep the history consistent with what the services would produce, it runs the three fraud rules with the default `fraud.*` settings and settles each transaction the way account-service would. Every seeded transaction therefore has its `fraud_screening` row and its `fraud_flag` rows, and each account's balance equals the sum of its `POSTED` transactions. Re-running replaces the previous seed and leaves other rows alone. `make seed-purge` removes it.
+
+Flagged transactions are seeded as **`MONITOR`-mode** hits: they post, with `blocked: false`. Under `ENFORCE`, `AMOUNT_SPIKE` would reject about 12% of ordinary spending (rent, utilities, a big grocery shop) against coffee-sized averages. To seed that instead, run `make seed SEED_ARGS="--fraud-mode enforce"`.
+
+Without `make`: `python scripts/seed/seed_demo_data.py | docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -q -U ledger -d ledgerwatch`.
+
+Ground truth goes to `scripts/seed/out/labels.json` (git-ignored). It contains every scenario with its transaction ids, every flag marked as a true or false positive with a reason, and the fraud transactions no rule caught. The data ends yesterday (UTC) by default. Pass `SEED_ARGS="--end 2026-11-13"` to reproduce a dataset exactly: the same `--seed`, `--days`, `--end` and `--fraud-mode` always give identical data and labels.
 
 ## APIs
 
