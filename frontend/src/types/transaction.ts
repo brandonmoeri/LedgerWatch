@@ -1,3 +1,5 @@
+import type { TransactionFlag } from './fraud';
+
 export type TransactionType = 'CREDIT' | 'DEBIT';
 
 export type TransactionStatus = 'PENDING' | 'POSTED' | 'REJECTED' | 'VOIDED';
@@ -18,6 +20,8 @@ export interface Transaction {
     description: string | null;
     createdAt: string;
     updatedAt: string;
+    /** Fraud rules that fired on it; empty if none did or it is still PENDING. */
+    flags: TransactionFlag[];
 }
 
 export interface TransactionsQuery {

@@ -276,7 +276,7 @@ Before sending a transaction's balance change, `OutboxPublisher` passes it to `F
 
 - **Mode:** `fraud.mode` (`FRAUD_RULES_MODE`) is `enforce` by default: any hit rejects the transaction as `SUSPECTED_FRAUD` and account-service is never called. `monitor` records hits and posts the transaction anyway, for trying thresholds on live traffic. `fraud.enabled` (`FRAUD_RULES_ENABLED`) turns screening off.
 - **Stored verdict:** each verdict is written to `fraud_screening` before the balance call. A redelivered event reuses it instead of re-running the rules, whose inputs (such as the 30-day average) may have changed, so a transaction can't post on one attempt and be rejected on the next after its balance has already moved.
-- **Flags:** each signal is also written as a `fraud_flag` row, with the account id and the verdict's `blocked`, in the same DB transaction as the verdict, so a replay never adds flags and a crash never leaves a verdict without them. `GET /accounts/{id}/flags` lists them for review. Flags record `MONITOR`-mode hits too (`blocked: false`), which is what makes that mode useful for tuning. `fraud_screening.signals` is kept as the replay record, so instances on the previous release keep working during a rolling deploy.
+- **Flags:** each signal is also written as a `fraud_flag` row, with the account id and the verdict's `blocked`, in the same DB transaction as the verdict, so a replay never adds flags and a crash never leaves a verdict without them. `GET /accounts/{id}/flags` lists them for review, and each transaction in `GET /transactions` and `GET /transactions/{id}` carries its own as `flags` (`rule`, `detail`), loaded with one query per page. Flags record `MONITOR`-mode hits too (`blocked: false`), which is what makes that mode useful for tuning. `fraud_screening.signals` is kept as the replay record, so instances on the previous release keep working during a rolling deploy.
 - **Failures:** if the account lookup fails, the event is handled like any failed account-service call: backoff for an outage, `ACCOUNT_NOT_FOUND` for a 404. Nothing is stored, so the rules run again on the retry.
 
 #### Transactional outbox
@@ -366,8 +366,8 @@ transactions.fraud_flag                               -- V8: one row per signal;
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| `GET` | `/transactions` | Any role | List transactions |
-| `GET` | `/transactions/{id}` | Any role | Fetch by UUID |
+| `GET` | `/transactions` | Any role | List transactions. Each has `flags`: the fraud rules that fired on it (`rule`, `detail`), empty if none or still `PENDING` |
+| `GET` | `/transactions/{id}` | Any role | Fetch by UUID, with `flags` as above |
 | `GET` | `/transactions/summary` | Any role | Dashboard summary |
 | `GET` | `/accounts/{id}/flags` | Any role | The account's fraud flags, newest first, paged (`page`, `size`, `sort`). Each has `transactionId`, `rule`, `detail`, `blocked` (rejected, or posted in `MONITOR` mode) and `flaggedAt`. Empty page if none. Lives here, not in account-service, because the flags do; the ALB routes this one path accordingly |
 | `POST` | `/transactions` | `ADMIN` | Accept (`accountId`, `type`, `amount` ≤4 dp, optional `description`): `202` with status `PENDING`. The outcome arrives later as `POSTED` or `REJECTED` with a `rejectionReason`; see [Transaction lifecycle](#transaction-lifecycle). Optional `Idempotency-Key` header: replays the original 202, 422 if reused with a different body |
@@ -418,18 +418,23 @@ frontend/src/
 ├── api/
 │   ├── client.ts       # Axios instance — baseURL /api, 10 s timeout, Bearer token interceptors
 │   ├── auth.ts         # POST /auth/login
-│   └── accounts.ts     # Typed wrappers around account-service CRUD endpoints
+│   ├── accounts.ts     # Typed wrappers around account-service CRUD endpoints
+│   └── fraudFlags.ts   # GET /accounts/{id}/flags (served by transaction-service)
 ├── auth/
 │   ├── auth.ts         # JWT storage (localStorage), payload decode, expiry check
 │   └── RequireAuth.tsx # Route guard — redirects to /login when no valid token
 ├── pages/
 │   ├── LoginPage.tsx               # Username/password form → stores JWT
 │   ├── AccountsDashboardPage.tsx   # Lists all accounts via RTK thunk
-│   ├── AccountDetailPage.tsx       # Single account view + PATCH form
+│   ├── AccountDetailPage.tsx       # Single account view + PATCH form + fraud flags panel
 │   └── CreateAccountPage.tsx       # POST /accounts form
+├── components/
+│   ├── FraudFlagBadges.tsx    # One badge per fraud rule on a transaction (Transactions page)
+│   └── AccountFlagsPanel.tsx  # Paged table of an account's fraud flags: rule, detail, blocked or monitored
 ├── store/
-│   ├── store.ts           # RTK store — single `accounts` slice
-│   └── accountsSlice.ts   # Async thunks: fetchAccounts, fetchAccountById, updateAccount
+│   ├── store.ts              # RTK store
+│   ├── accountsSlice.ts      # Async thunks: fetchAccounts, fetchAccountById, updateAccount
+│   └── accountFlagsSlice.ts  # fetchAccountFlags; drops answers to superseded requests
 └── types/
     └── account.ts         # Account, UpdateAccountRequest interfaces
 ```
@@ -440,7 +445,7 @@ frontend/src/
 
 ### Dev proxy
 
-Vite rewrites `/api/*` → `http://localhost:8081/*` (strips `/api` prefix), so the SPA and account-service share the same origin in development without CORS configuration.
+Vite strips the `/api` prefix and routes like the ALB: `/api/transactions*` and `/api/accounts/{id}/flags` → transaction-service (`http://localhost:8082`), everything else → account-service (`http://localhost:8081`). The SPA and both services share one origin in development without CORS configuration.
 
 ### Testing
 

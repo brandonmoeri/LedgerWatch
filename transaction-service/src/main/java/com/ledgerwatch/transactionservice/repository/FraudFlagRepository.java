@@ -1,6 +1,8 @@
 package com.ledgerwatch.transactionservice.repository;
 
 import com.ledgerwatch.transactionservice.domain.FraudFlag;
+import java.util.Collection;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -31,4 +33,7 @@ public interface FraudFlagRepository extends JpaRepository<FraudFlag, UUID> {
       @Param("blocked") boolean blocked);
 
   Page<FraudFlag> findByAccountId(UUID accountId, Pageable pageable);
+
+  /** The flags of these transactions; served by the (transaction_id, rule) unique index. */
+  List<FraudFlag> findByTransactionIdInOrderByRule(Collection<UUID> transactionIds);
 }

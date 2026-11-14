@@ -171,3 +171,32 @@
   color: #52514e;
   margin-bottom: 0.25rem;
 }
+
+.flag-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.flag-badge {
+  display: inline-block;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid #c7671f;
+  border-radius: 999px;
+  background: #fdf0e4;
+  color: #6e3207;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.flags-panel {
+  margin-top: 2rem;
+}
+
+.flags-panel h2 {
+  font-size: 1.1rem;
+}

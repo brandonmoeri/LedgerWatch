@@ -6,8 +6,11 @@ import static com.ledgerwatch.transactionservice.fraud.AccountFraudFlagsIntegrat
 import static com.ledgerwatch.transactionservice.fraud.AccountFraudFlagsIntegrationTest.flagsRequest;
 import static com.ledgerwatch.transactionservice.fraud.AccountFraudFlagsIntegrationTest.stubAccountAged;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
 import com.ledgerwatch.transactionservice.TestcontainersConfiguration;
@@ -26,6 +29,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -76,5 +80,20 @@ class AccountFraudFlagsMonitorModeIntegrationTest {
     assertThat(settled.getStatus()).isEqualTo(TransactionStatus.POSTED);
     assertSingleFlag(
         objectMapper.readTree(body).get("content"), settled, NewAccountLargeDebitRule.NAME, false);
+
+    String tx =
+        mockMvc
+            .perform(
+                get("/transactions/{id}", debit.getId())
+                    .with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ANALYST"))))
+            .andExpect(status().isOk())
+            .andReturn()
+            .getResponse()
+            .getContentAsString();
+    JsonNode posted = objectMapper.readTree(tx);
+    assertThat(posted.get("status").asText()).isEqualTo("POSTED");
+    assertThat(posted.get("flags"))
+        .extracting(f -> f.get("rule").asText())
+        .containsExactly(NewAccountLargeDebitRule.NAME);
   }
 }

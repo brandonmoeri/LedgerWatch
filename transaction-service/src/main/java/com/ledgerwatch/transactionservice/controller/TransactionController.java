@@ -17,7 +17,6 @@ import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import jakarta.validation.Valid;
 import java.time.Instant;
 import java.util.UUID;
-import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
@@ -37,9 +36,12 @@ public class TransactionController {
   static final String IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed";
 
   private final TransactionService transactionService;
+  private final TransactionResponses responses;
 
-  public TransactionController(TransactionService transactionService) {
+  public TransactionController(
+      TransactionService transactionService, TransactionResponses responses) {
     this.transactionService = transactionService;
+    this.responses = responses;
   }
 
   @GetMapping("/{id}")
@@ -50,7 +52,7 @@ public class TransactionController {
       description = "Transaction not found",
       content = @Content(schema = @Schema(implementation = ProblemDetail.class)))
   public TransactionResponse getTransactionById(@PathVariable UUID id) {
-    return TransactionResponse.from(transactionService.getById(id));
+    return responses.of(transactionService.getById(id));
   }
 
   @GetMapping
@@ -58,7 +60,8 @@ public class TransactionController {
       summary = "List transactions",
       description =
           "Supports pagination (page, size), sorting (sort), and filtering by accountId, type, "
-              + "status, description, and createdAt date range (createdFrom, createdTo).")
+              + "status, description, and createdAt date range (createdFrom, createdTo). Each "
+              + "transaction lists the fraud rules that fired on it in flags.")
   @ApiResponse(responseCode = "200", description = "Transactions returned")
   public PagedModel<TransactionResponse> getAllTransactions(
       @RequestParam(required = false) UUID accountId,
@@ -69,11 +72,10 @@ public class TransactionController {
       @RequestParam(required = false) Instant createdTo,
       @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC)
           Pageable pageable) {
-    Page<TransactionResponse> page =
-        transactionService
-            .getAll(accountId, type, status, description, createdFrom, createdTo, pageable)
-            .map(TransactionResponse::from);
-    return new PagedModel<>(page);
+    return new PagedModel<>(
+        responses.of(
+            transactionService.getAll(
+                accountId, type, status, description, createdFrom, createdTo, pageable)));
   }
 
   @GetMapping("/summary")
@@ -153,6 +155,6 @@ public class TransactionController {
   })
   public TransactionResponse updateTransaction(
       @PathVariable UUID id, @Valid @RequestBody UpdateTransactionRequest request) {
-    return TransactionResponse.from(transactionService.updateTransaction(id, request));
+    return responses.of(transactionService.updateTransaction(id, request));
   }
 }

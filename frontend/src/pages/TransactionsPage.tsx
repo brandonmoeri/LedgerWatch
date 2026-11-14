@@ -8,6 +8,7 @@ import DataTable from '../components/DataTable';
 import type { DataTableColumn, DataTableSort } from '../components/DataTable';
 import TransactionFilterForm from '../components/TransactionFilterForm';
 import TransactionStatusBadge from '../components/TransactionStatusBadge';
+import FraudFlagBadges from '../components/FraudFlagBadges';
 import { useStableCallback } from '../hooks/useStableCallback';
 
 const COLUMNS: DataTableColumn<Transaction>[] = [
@@ -18,6 +19,7 @@ const COLUMNS: DataTableColumn<Transaction>[] = [
     header: 'Status',
     render: (tx) => <TransactionStatusBadge status={tx.status} rejectionReason={tx.rejectionReason} />,
   },
+  { key: 'flags', header: 'Flags', render: (tx) => <FraudFlagBadges flags={tx.flags} /> },
   { key: 'amount', header: 'Amount', render: (tx) => tx.amount, sortField: 'amount' },
   { key: 'description', header: 'Description', render: (tx) => tx.description },
 ];

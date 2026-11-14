@@ -1,6 +1,7 @@
 import { http, HttpResponse, delay } from 'msw';
 import type { Account } from '../../types/account';
 import type { Transaction } from '../../types/transaction';
+import type { FraudFlag } from '../../types/fraud';
 import type { DashboardSummary } from '../../types/dashboard';
 import type { PagedResponse } from '../../types/pagination';
 import type { LoginResponse } from '../../api/auth';
@@ -45,6 +46,8 @@ export const handlers = [
         };
         return HttpResponse.json(account);
     }),
+
+    http.get('/api/accounts/:id/flags', () => HttpResponse.json(emptyPage<FraudFlag>())),
 
     http.get('/api/transactions', () => HttpResponse.json(emptyPage<Transaction>())),
 

@@ -257,6 +257,36 @@ class AccountFraudFlagsIntegrationTest {
   }
 
   @Test
+  void transactions_carryTheirFlags() throws Exception {
+    UUID accountId = accountAcceptingAdjustments(accountService);
+    stubAccountAged(accountService, accountId, Duration.ofHours(2));
+    for (int i = 0; i < MAX_VELOCITY; i++) {
+      createAndSettle(accountId, TransactionType.CREDIT, "10.00");
+    }
+    Transaction debit = createAndSettle(accountId, TransactionType.DEBIT, "1500.00");
+
+    JsonNode one = page(transactionRequest("/transactions/{id}", debit.getId()));
+    assertThat(one.get("flags"))
+        .extracting(f -> f.get("rule").asText())
+        .containsExactly(NewAccountLargeDebitRule.NAME, VelocityRule.NAME); // sorted by rule
+    assertThat(one.get("flags")).allSatisfy(f -> assertThat(f.get("detail").asText()).isNotBlank());
+
+    JsonNode list =
+        page(transactionRequest("/transactions").param("accountId", accountId.toString()));
+    assertThat(list.get("content")).hasSize(MAX_VELOCITY + 1);
+    assertThat(list.get("content"))
+        .allSatisfy(
+            tx -> {
+              int expected = tx.get("id").asText().equals(debit.getId().toString()) ? 2 : 0;
+              assertThat(tx.get("flags")).hasSize(expected);
+            });
+  }
+
+  private static MockHttpServletRequestBuilder transactionRequest(String path, Object... vars) {
+    return get(path, vars).with(jwt().authorities(new SimpleGrantedAuthority("ROLE_ANALYST")));
+  }
+
+  @Test
   void unknownAccount_isAnEmptyPage() throws Exception {
     JsonNode page = page(flagsRequest(UUID.randomUUID()));
 

@@ -9,7 +9,7 @@ A banking microservice platform for tracking accounts and transactions, built as
 | `account-service` (Spring Boot 3.3, Java 21) | **Functional** — full account CRUD REST API, JPA persistence, validation, unit + integration tests |
 | `transaction-service` (Spring Boot 3.3, Java 21) | **Functional** — full transaction CRUD REST API, JPA persistence, validation, unit + integration tests |
 | Postgres + both services (local, via Docker Compose) | Running — `accounts` and `transactions` schemas owned by per-service Flyway migrations |
-| React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create, and transactions pages; Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
+| React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create (with a fraud flags panel), and transactions pages (with fraud flag badges); Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
 | CI/CD | **CI functional** — GitHub Actions on PRs to `master`/`dev`: path-filtered per-service Spotless check + `mvn verify` (JaCoCo 70% coverage gate), frontend type check + lint + Vitest; Docker images published to GHCR on push to `dev`. AWS access from Actions via OIDC (no stored keys); deployment (CD) not started |
 | AWS infra | IaC ready (Terraform modules, `infra/aws/`) for both services on ECS Fargate + RDS. `account-service` was deployed and CRUD-verified on the earlier single-service config, then torn down; the two-service config has been planned but not yet applied |
 
@@ -70,7 +70,7 @@ Account statuses: `ACTIVE`, `FROZEN`, `CLOSED`.
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/transactions` | List all transactions |
+| `GET` | `/transactions` | List all transactions, each with the fraud rules that fired on it (`flags`) |
 | `GET` | `/transactions/{id}` | Fetch transaction by UUID |
 | `POST` | `/transactions` | Accept a transaction (`accountId`, `type`, `amount`, optional `description`) and return `202` with status `PENDING`; send an `Idempotency-Key` header to make retries safe |
 | `PATCH` | `/transactions/{id}` | Update `description`, or void a `POSTED` transaction |

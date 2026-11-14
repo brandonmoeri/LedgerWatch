@@ -18,6 +18,7 @@ const mockTransaction: Transaction = {
     description: 'Paycheck',
     createdAt: '2024-01-15T10:00:00Z',
     updatedAt: '2024-01-15T10:00:00Z',
+    flags: [],
 };
 
 type SliceStatus = 'idle' | 'loading' | 'succeeded' | 'failed';
@@ -134,6 +135,26 @@ describe('TransactionsPage', () => {
             });
             expect(screen.getByText('REJECTED')).toBeInTheDocument();
             expect(screen.getByText('Insufficient funds')).toBeInTheDocument();
+        });
+
+        it('badges a flagged transaction with the rules that fired', () => {
+            renderPage({
+                status: 'succeeded',
+                items: [
+                    {
+                        ...mockTransaction,
+                        flags: [{ rule: 'VELOCITY', detail: '4 transactions in PT10M (max 3)' }],
+                    },
+                ],
+            });
+            const flags = screen.getByRole('list', { name: 'Fraud flags' });
+            expect(flags).toHaveTextContent('Velocity');
+            expect(flags).toHaveTextContent('4 transactions in PT10M (max 3)');
+        });
+
+        it('shows no flag badges on an unflagged transaction', () => {
+            renderPage({ status: 'succeeded', items: [mockTransaction] });
+            expect(screen.queryByRole('list', { name: 'Fraud flags' })).toBeNull();
         });
     });
 
