@@ -26,6 +26,8 @@ jobs:
               - 'account-service/**'
             transaction-service:
               - 'transaction-service/**'
+            insights-service:
+              - 'insights-service/**'
             frontend:
               - 'frontend/**'
             common:
@@ -43,6 +45,9 @@ jobs:
           fi
           if [[ "${{ steps.filter.outputs['transaction-service'] }}" == 'true' || "${{ steps.filter.outputs.common }}" == 'true' ]]; then
             services+=("transaction-service")
+          fi
+          if [[ "${{ steps.filter.outputs['insights-service'] }}" == 'true' || "${{ steps.filter.outputs.common }}" == 'true' ]]; then
+            services+=("insights-service")
           fi
           if [[ ${#services[@]} -eq 0 ]]; then
             json='[]'

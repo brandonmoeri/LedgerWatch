@@ -50,5 +50,17 @@ services:
     ports:
       - "8082:8082"
 
+  insights-service:
+    build:
+      context: .
+      dockerfile: insights-service/Dockerfile
+    container_name: ledgerwatch-insights-service
+    environment:
+      JWT_SECRET: ${JWT_SECRET}
+      # From .env; the service refuses to start if it is empty.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+    ports:
+      - "8083:8083"
+
 volumes:
   postgres_data:

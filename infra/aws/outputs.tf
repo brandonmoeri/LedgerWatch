@@ -62,3 +62,8 @@ output "alarm_topic_arn" {
   description = "SNS topic every alarm notifies; subscribe more endpoints to it as needed"
   value       = module.monitoring.alarm_topic_arn
 }
+
+output "anthropic_api_key_secret_arn" {
+  description = "Put the Claude API key here before insights-service can start (see README)"
+  value       = aws_secretsmanager_secret.anthropic_api_key.arn
+}

@@ -1,0 +1,53 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: insights-service
+  ai:
+    anthropic:
+      # Locally from the environment (.env / docker compose); on ECS the task definition injects it
+      # from the ledgerwatch/anthropic-api-key Secrets Manager secret. ChatClientConfig refuses to
+      # start if it is blank.
+      api-key: ${ANTHROPIC_API_KEY:}
+      base-url: ${ANTHROPIC_BASE_URL:https://api.anthropic.com}
+      chat:
+        options:
+          model: ${INSIGHTS_MODEL:claude-opus-5-5}
+          max-tokens: 16000
+          # No temperature: Spring AI defaults it to 0.8, and Opus 5.5 rejects sampling parameters
+          # with a 400. ChatClientConfig clears it.
+    # Spring AI's defaults (10 attempts, backoff up to 3 min) would hold a request thread for ~10 min
+    # during an outage. 4xx answers are never retried.
+    retry:
+      max-attempts: 3
+      backoff:
+        initial-interval: 1s
+        multiplier: 2
+        max-interval: 10s
+  http:
+    client:
+      connect-timeout: 5s
+      # Non-streaming calls with adaptive thinking and 16k output tokens can run for minutes.
+      read-timeout: 5m
+
+jwt:
+  secret: ${JWT_SECRET}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # Everything but health requires ROLE_ADMIN (see SecurityConfig).
+        include: health, metrics
+  endpoint:
+    health:
+      show-details: never
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+# [correlationId] in text-format log lines (LOG_FORMAT=text); JSON lines carry it as a field.
+logging:
+  pattern:
+    correlation: "[%X{correlationId:-}] "

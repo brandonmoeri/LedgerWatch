@@ -5,6 +5,7 @@ COPY pom.xml .
 COPY common/pom.xml common/pom.xml
 COPY account-service/pom.xml account-service/pom.xml
 COPY transaction-service/pom.xml transaction-service/pom.xml
+COPY insights-service/pom.xml insights-service/pom.xml
 RUN mvn -q -pl transaction-service -am dependency:go-offline
 
 COPY common common

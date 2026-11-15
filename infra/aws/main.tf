@@ -49,6 +49,18 @@ resource "aws_secretsmanager_secret_version" "jwt" {
   secret_string = random_password.jwt.result
 }
 
+# Claude API key for insights-service. Terraform creates the empty secret only: the key
+# itself is put in out of band (README "Deploying"), so it never lands in Terraform state.
+# ECS can't start insights-service tasks until the secret has a value.
+resource "aws_secretsmanager_secret" "anthropic_api_key" {
+  name                    = "${var.project}/anthropic-api-key"
+  recovery_window_in_days = 0
+
+  tags = {
+    Name = "${var.project}-anthropic-api-key"
+  }
+}
+
 locals {
   # transaction-service's ledgerwatch.* meters (see its TransactionMetrics, OutboxBacklogMetrics).
   metrics_namespace = "LedgerWatch"
@@ -153,6 +165,28 @@ module "transaction_service" {
 
   environment = {
     ACCOUNT_SERVICE_URL = module.account_service.internal_url
+  }
+}
+
+# No load balancer route or database yet: it has no endpoints besides /actuator/health,
+# and calls only the Claude API (outbound over the task's public IP).
+module "insights_service" {
+  source = "./modules/ecs-service"
+
+  project                     = var.project
+  aws_region                  = var.aws_region
+  cluster_id                  = aws_ecs_cluster.main.id
+  vpc_id                      = module.network.vpc_id
+  subnet_ids                  = module.network.public_subnet_ids
+  service_discovery_namespace = aws_service_discovery_private_dns_namespace.main
+  admin_cidr                  = var.admin_cidr
+
+  service_name   = "insights-service"
+  container_port = 8083
+
+  secrets = {
+    JWT_SECRET        = { arn = aws_secretsmanager_secret.jwt.arn }
+    ANTHROPIC_API_KEY = { arn = aws_secretsmanager_secret.anthropic_api_key.arn }
   }
 }
 

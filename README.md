@@ -8,6 +8,7 @@ A banking microservice platform for tracking accounts and transactions, built as
 |---|---|
 | `account-service` (Spring Boot 3.3, Java 21) | **Functional** — full account CRUD REST API, JPA persistence, validation, unit + integration tests |
 | `transaction-service` (Spring Boot 3.3, Java 21) | **Functional** — full transaction CRUD REST API, JPA persistence, validation, unit + integration tests |
+| `insights-service` (Spring Boot 3.5, Spring AI 1.1, Java 21) | **Scaffold** — Claude (`claude-opus-5-5`) wired through a Spring AI `ChatClient`; no endpoints yet |
 | Postgres + both services (local, via Docker Compose) | Running — `accounts` and `transactions` schemas owned by per-service Flyway migrations |
 | React/TS frontend (Vite, React 19, Redux Toolkit) | **In progress** — JWT login, dashboard (Recharts balance-over-time and spend-by-type), accounts list/detail/create (with a fraud flags panel), and transactions pages (with fraud flag badges); Redux Toolkit store; Axios API client; Storybook; Vitest + Testing Library + MSW + jest-axe tests |
 | CI/CD | **CI functional** — GitHub Actions on PRs to `master`/`dev`: path-filtered per-service Spotless check + `mvn verify` (JaCoCo 70% coverage gate), frontend type check + lint + Vitest; Docker images published to GHCR on push to `dev`. AWS access from Actions via OIDC (no stored keys); deployment (CD) not started |
@@ -19,6 +20,7 @@ Two separately deployable Spring Boot services, each owning its own Postgres sch
 
 - **`account-service`** (`:8081`) — account identity, balances, and lifecycle. Source of truth for account state.
 - **`transaction-service`** (`:8082`) — transaction history and posting logic; will validate against `account-service` rather than touching its schema directly.
+- **`insights-service`** (`:8083`) — plain-language insights from Claude via Spring AI. No database; reads the Anthropic API key from `ANTHROPIC_API_KEY`.
 - **`frontend`** — React + TypeScript SPA wired to `account-service`; Redux Toolkit for state, React Router for navigation.
 
 Planned infra path: local Postgres → AWS RDS → Aurora → EKS → Lambda (event-driven workloads).
@@ -30,6 +32,8 @@ LedgerWatch/
 ├── account-service/          # Spring Boot — account identity & balances
 │   └── Dockerfile            # Multi-stage build (Maven reactor → JRE runtime image)
 ├── transaction-service/      # Spring Boot — transaction posting & history
+│   └── Dockerfile            # Multi-stage build (Maven reactor → JRE runtime image)
+├── insights-service/         # Spring Boot + Spring AI — Claude-backed insights
 │   └── Dockerfile            # Multi-stage build (Maven reactor → JRE runtime image)
 ├── frontend/                 # React/TS SPA — Vite, Redux Toolkit, React Router
 ├── docker/postgres/init.sql  # Schema seed (accounts + transactions schemas)
@@ -43,6 +47,7 @@ LedgerWatch/
 
 ```bash
 # Copy env template and fill in JWT_SECRET (32+ random bytes)
+# and ANTHROPIC_API_KEY (insights-service only; it won't start without one)
 cp .env.example .env
 
 # Start Postgres + account-service + transaction-service
@@ -52,7 +57,7 @@ docker compose up -d --build
 cd frontend && npm install && npm run dev
 ```
 
-To run a service outside its container (e.g. for debugging), stop it in Compose and run it directly from the repo root: `mvn -pl account-service spring-boot:run` or `mvn -pl transaction-service spring-boot:run`.
+To run a service outside its container (e.g. for debugging), stop it in Compose and run it directly from the repo root: `mvn -pl account-service spring-boot:run` or `mvn -pl transaction-service spring-boot:run`. For `insights-service`, export `ANTHROPIC_API_KEY` and `JWT_SECRET` in that shell first (`.env` is only read by Compose).
 
 ### Demo data
 
@@ -162,6 +167,13 @@ terraform apply -var "admin_cidr=<your-ip>/32" -target=module.rds
 docker run --rm -i postgres:16-alpine psql "postgresql://ledger:<db_password>@<rds_endpoint>:5432/ledgerwatch?sslmode=require" < docker/postgres/init.sql  # from the repo root
 terraform apply -var "admin_cidr=<your-ip>/32" -var "alarm_email=<you@example.com>"  # alarm_email is optional
 curl -i "$(terraform output -raw alb_url)/accounts"  # 401 from account-service means routing works
+```
+
+`insights-service` reads its Claude API key from the `ledgerwatch/anthropic-api-key` secret, which Terraform creates empty so the key never enters Terraform state. Put the key in once per stack (before or after `terraform apply`; ECS can't start the service's tasks until it's there), then push its image the same way as the other two:
+
+```bash
+aws secretsmanager put-secret-value --secret-id ledgerwatch/anthropic-api-key --secret-string "$ANTHROPIC_API_KEY"
+aws ecs update-service --cluster ledgerwatch-cluster --service ledgerwatch-insights-service --force-new-deployment  # if it was already failing to start
 ```
 
 Then publish the SPA (from the repo root). Hashed assets are cached for a year; `index.html` is revalidated on every request, so a new deploy is visible without waiting on the CDN:
