@@ -7,6 +7,7 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Component;
 
 /**
@@ -17,6 +18,10 @@ import org.springframework.stereotype.Component;
  * first generation is a thinking block (with empty text) and {@code content()} returns "". This
  * joins the text blocks instead, and turns a refusal or a truncated answer into an exception rather
  * than a blank or half-finished reply.
+ *
+ * <p>Claude may call the {@link LedgerTools} while answering. They read the ledger as {@code
+ * caller}: the caller's token goes into the tool context, which Spring AI hands to the tools but
+ * never sends to Claude.
  */
 @Component
 public class InsightsChat {
@@ -27,8 +32,15 @@ public class InsightsChat {
     this.chatClient = insightsChatClient;
   }
 
-  public String ask(String question) {
-    ChatResponse response = chatClient.prompt().user(question).call().chatResponse();
+  public String ask(String question, Jwt caller) {
+    Objects.requireNonNull(caller, "caller");
+    ChatResponse response =
+        chatClient
+            .prompt()
+            .user(question)
+            .toolContext(Map.of(LedgerTools.CALLER_TOKEN, caller.getTokenValue()))
+            .call()
+            .chatResponse();
     if (response == null) {
       throw new InsightsGenerationException(null, "Claude returned no response");
     }

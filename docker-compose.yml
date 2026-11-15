@@ -55,8 +55,14 @@ services:
       context: .
       dockerfile: insights-service/Dockerfile
     container_name: ledgerwatch-insights-service
+    depends_on:
+      - account-service
+      - transaction-service
     environment:
       JWT_SECRET: ${JWT_SECRET}
+      # Read with the end user's own JWT by the insights tools.
+      ACCOUNT_SERVICE_URL: http://account-service:8081
+      TRANSACTION_SERVICE_URL: http://transaction-service:8082
       # From .env; the service refuses to start if it is empty.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
     ports:

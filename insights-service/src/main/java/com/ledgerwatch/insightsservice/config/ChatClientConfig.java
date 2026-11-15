@@ -1,5 +1,6 @@
 package com.ledgerwatch.insightsservice.config;
 
+import com.ledgerwatch.insightsservice.ai.LedgerTools;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.model.anthropic.autoconfigure.AnthropicChatProperties;
 import org.springframework.ai.model.anthropic.autoconfigure.AnthropicConnectionProperties;
@@ -24,9 +25,10 @@ public class ChatClientConfig {
   public ChatClient insightsChatClient(
       ChatClient.Builder builder,
       AnthropicConnectionProperties connection,
-      @Value("classpath:prompts/insights-system.md") Resource systemPrompt) {
+      @Value("classpath:prompts/insights-system.md") Resource systemPrompt,
+      LedgerTools ledgerTools) {
     requireApiKey(connection.getApiKey());
-    return builder.defaultSystem(systemPrompt).build();
+    return builder.defaultSystem(systemPrompt).defaultTools(ledgerTools).build();
   }
 
   /**

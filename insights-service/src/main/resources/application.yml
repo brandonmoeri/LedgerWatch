@@ -34,6 +34,13 @@ spring:
 jwt:
   secret: ${JWT_SECRET}
 
+# Read by the insights tools (LedgerTools), always with the end user's own JWT.
+ledger-services:
+  account-service-url: ${ACCOUNT_SERVICE_URL:http://localhost:8081}
+  transaction-service-url: ${TRANSACTION_SERVICE_URL:http://localhost:8082}
+  connect-timeout: ${LEDGER_SERVICES_CONNECT_TIMEOUT:2s}
+  read-timeout: ${LEDGER_SERVICES_READ_TIMEOUT:10s}
+
 management:
   endpoints:
     web:

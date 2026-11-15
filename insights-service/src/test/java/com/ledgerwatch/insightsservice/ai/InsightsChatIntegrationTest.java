@@ -18,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 
@@ -46,6 +47,9 @@ class InsightsChatIntegrationTest {
 
   @Autowired InsightsChat insightsChat;
 
+  static final Jwt CALLER =
+      Jwt.withTokenValue("caller-token").header("alg", "HS256").subject("analyst").build();
+
   @BeforeEach
   void reset() {
     anthropic.resetAll();
@@ -61,7 +65,7 @@ class InsightsChatIntegrationTest {
         {"type": "text", "text": " on last month."}
         """);
 
-    assertThat(insightsChat.ask("How is my grocery spending?"))
+    assertThat(insightsChat.ask("How is my grocery spending?", CALLER))
         .isEqualTo("Groceries are up 12% on last month.");
   }
 
@@ -69,7 +73,7 @@ class InsightsChatIntegrationTest {
   void sendsTheConfiguredModelKeyAndSystemPromptWithoutSamplingParameters() {
     respondWith("end_turn", "{\"type\": \"text\", \"text\": \"ok\"}");
 
-    insightsChat.ask("Hello");
+    insightsChat.ask("Hello", CALLER);
 
     anthropic.verify(
         postRequestedFor(urlEqualTo("/v1/messages"))
@@ -86,7 +90,7 @@ class InsightsChatIntegrationTest {
   void refusalIsAnErrorNotABlankAnswer() {
     respondWith("refusal", "");
 
-    assertThatThrownBy(() -> insightsChat.ask("..."))
+    assertThatThrownBy(() -> insightsChat.ask("...", CALLER))
         .isInstanceOf(InsightsGenerationException.class)
         .extracting("stopReason")
         .isEqualTo("refusal");
@@ -96,7 +100,7 @@ class InsightsChatIntegrationTest {
   void truncatedAnswerIsAnError() {
     respondWith("max_tokens", "{\"type\": \"text\", \"text\": \"Your spending in\"}");
 
-    assertThatThrownBy(() -> insightsChat.ask("..."))
+    assertThatThrownBy(() -> insightsChat.ask("...", CALLER))
         .isInstanceOf(InsightsGenerationException.class)
         .extracting("stopReason")
         .isEqualTo("max_tokens");

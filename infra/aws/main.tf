@@ -131,10 +131,12 @@ module "account_service" {
     target_group_arn = module.alb.target_group_arns["account-service"]
   }
 
-  # transaction-service's outbox publisher applies balance adjustments here.
+  # transaction-service's outbox publisher applies balance adjustments here; insights-service's
+  # tools read accounts with the end user's JWT.
   allowed_security_groups = {
     "Load balancer"                    = module.alb.security_group_id
     "transaction-service Fargate task" = module.transaction_service.security_group_id
+    "insights-service Fargate task"    = module.insights_service.security_group_id
   }
 }
 
@@ -159,8 +161,10 @@ module "transaction_service" {
     target_group_arn = module.alb.target_group_arns["transaction-service"]
   }
 
+  # insights-service's tools read transactions and fraud flags with the end user's JWT.
   allowed_security_groups = {
-    "Load balancer" = module.alb.security_group_id
+    "Load balancer"                 = module.alb.security_group_id
+    "insights-service Fargate task" = module.insights_service.security_group_id
   }
 
   environment = {
@@ -168,8 +172,9 @@ module "transaction_service" {
   }
 }
 
-# No load balancer route or database yet: it has no endpoints besides /actuator/health,
-# and calls only the Claude API (outbound over the task's public IP).
+# No load balancer route or database yet: it has no endpoints besides /actuator/health.
+# It calls the Claude API (outbound over the task's public IP) and, from its tools,
+# account-service and transaction-service over service discovery.
 module "insights_service" {
   source = "./modules/ecs-service"
 
@@ -187,6 +192,11 @@ module "insights_service" {
   secrets = {
     JWT_SECRET        = { arn = aws_secretsmanager_secret.jwt.arn }
     ANTHROPIC_API_KEY = { arn = aws_secretsmanager_secret.anthropic_api_key.arn }
+  }
+
+  environment = {
+    ACCOUNT_SERVICE_URL     = module.account_service.internal_url
+    TRANSACTION_SERVICE_URL = module.transaction_service.internal_url
   }
 }
 
